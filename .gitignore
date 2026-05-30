@@ -1,0 +1,7 @@
+.zig-cache
+zig-out
+.env
+libopenai.a
+libopenai.a.o
+docs
+.notes
