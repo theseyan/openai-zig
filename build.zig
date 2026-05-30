@@ -10,18 +10,40 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe_module = b.createModule(.{
+    const main_example = b.createModule(.{
         .root_source_file = b.path("examples/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_module.addImport("openai", openai_module);
+    main_example.addImport("openai", openai_module);
 
-    const exe = b.addExecutable(.{
+    const main_exe = b.addExecutable(.{
         .name = "openai-example",
-        .root_module = exe_module,
+        .root_module = main_example,
     });
-    b.installArtifact(exe);
+    b.installArtifact(main_exe);
+
+    const vision_example = b.createModule(.{
+        .root_source_file = b.path("examples/vision.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vision_example.addImport("openai", openai_module);
+    b.installArtifact(b.addExecutable(.{
+        .name = "openai-vision-example",
+        .root_module = vision_example,
+    }));
+
+    const files_example = b.createModule(.{
+        .root_source_file = b.path("examples/files.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    files_example.addImport("openai", openai_module);
+    b.installArtifact(b.addExecutable(.{
+        .name = "openai-files-example",
+        .root_module = files_example,
+    }));
 
     const docs = b.addObject(.{
         .name = "openai",
@@ -35,7 +57,7 @@ pub fn build(b: *std.Build) void {
     const build_docs_step = b.step("docs", "Build the openai-zig docs");
     build_docs_step.dependOn(&build_docs.step);
 
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(main_exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);

@@ -15,6 +15,7 @@ const std = @import("std");
 const chat = @import("chat.zig");
 const completions = @import("completions.zig");
 const embeddings = @import("embeddings.zig");
+const files = @import("files.zig");
 const models = @import("models.zig");
 const json = @import("json.zig");
 
@@ -175,6 +176,7 @@ pub const OpenAI = struct {
     chat: chat.Chat,
     models: models.Models,
     embeddings: embeddings.Embeddings,
+    files: files.Files,
     api_key: []const u8,
     base_url: []const u8,
     organization: ?[]const u8,
@@ -224,6 +226,7 @@ pub const OpenAI = struct {
             .io = io,
             .chat = undefined, // have to pass in self
             .embeddings = undefined, // have to pass in self
+            .files = undefined, // have to pass in self
             .models = undefined, // have to pass in self
             .api_key = undefined,
             .base_url = undefined,
@@ -260,6 +263,7 @@ pub const OpenAI = struct {
         // init sub components
         self.chat = chat.Chat.init(self);
         self.embeddings = embeddings.Embeddings.init(self);
+        self.files = files.Files.init(self);
         self.models = models.Models.init(self);
 
         // client headers
@@ -292,6 +296,7 @@ pub const OpenAI = struct {
     pub fn deinit(self: *OpenAI) void {
         self.chat.deinit();
         self.embeddings.deinit();
+        self.files.deinit();
         self.arena.deinit();
         self.allocator.destroy(self.arena);
         self.allocator.destroy(self);
@@ -301,6 +306,12 @@ pub const OpenAI = struct {
         method: std.http.Method,
         path: []const u8,
         json: ?[]const u8 = null,
+    };
+
+    pub const MultipartRequest = struct {
+        path: []const u8,
+        body: []const u8,
+        content_type: []const u8,
     };
 
     /// Creates a request to OpenAI expecting SSE events. Returns a `Stream` struct wrapping the response type.
@@ -456,6 +467,61 @@ pub const OpenAI = struct {
             }
         }
         // max_retries must be >= 0 (since it's usize) and loop condition is 0..max_retries+1
+        unreachable;
+    }
+
+    /// Makes a multipart/form-data request to OpenAI. The caller owns `body` and `content_type`.
+    pub fn requestMultipart(self: *const OpenAI, options: MultipartRequest, comptime ResponseType: ?type) !if (ResponseType) |T| T else void {
+        const allocator = self.allocator;
+        const url_string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ self.base_url, options.path });
+        defer allocator.free(url_string);
+
+        const uri = try std.Uri.parse(url_string);
+        var http_client = std.http.Client{ .allocator = allocator, .io = self.io };
+        defer http_client.deinit();
+        var headers = self.headers;
+        headers.content_type = .{ .override = options.content_type };
+        var backoff: f32 = INITIAL_RETRY_DELAY;
+
+        for (0..self.max_retries + 1) |attempt| {
+            var response_writer = std.Io.Writer.Allocating.init(allocator);
+            defer response_writer.deinit();
+            const result = try http_client.fetch(.{
+                .location = .{ .uri = uri },
+                .method = .POST,
+                .payload = options.body,
+                .headers = headers,
+                .extra_headers = self.extra_headers,
+                .redirect_behavior = .unhandled,
+                .response_writer = &response_writer.writer,
+            });
+            const body = try response_writer.toOwnedSlice();
+            defer allocator.free(body);
+
+            const status_int = @intFromEnum(result.status);
+            log.info("POST - {s} - {d} {s}", .{ url_string, status_int, result.status.phrase() orelse "Unknown" });
+            if (status_int < 200 or status_int >= 300) {
+                if (attempt != self.max_retries and status_int >= 429) {
+                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
+                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
+                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                } else {
+                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
+                        log.err("{s}", .{body});
+                        return OpenAIError.BadRequest;
+                    };
+                    defer err.deinit();
+                    log.info("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
+                    return getErrorFromStatus(result.status);
+                }
+            } else {
+                if (ResponseType) |T| {
+                    return json.deserializeStructWithArena(T, allocator, body);
+                } else {
+                    return;
+                }
+            }
+        }
         unreachable;
     }
 };

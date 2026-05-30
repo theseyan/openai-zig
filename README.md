@@ -12,8 +12,11 @@
 - An easy-to-use interface, similar to `openai-python`
 - Built-in retry logic
 - Environment variable config support for API keys, organization IDs, project IDs, and base URLs
-- Response streaming support
-- Integration with the most popular OpenAI endpoints with a generic `request`/`requestStream` method for missing endpoints
+- Chat completions, including streaming responses and image understanding
+- Embeddings
+- Models
+- Files upload with `multipart/form-data`
+- Generic `request`, `requestStream`, and multipart request methods for missing endpoints
 
 ## Installation
 
@@ -59,10 +62,10 @@ const OpenAI = openai.OpenAI;
 ```zig
 pub fn main(init: std.process.Init) !void {
     // Uses OPENAI_API_KEY from init.environ_map, or pass .api_key explicitly.
-    var openai = try OpenAI.init(init.gpa, init.io, .{
+    var client = try OpenAI.init(init.gpa, init.io, .{
         .environ_map = init.environ_map,
     });
-    defer openai.deinit();
+    defer client.deinit();
 }
 ```
 
@@ -152,7 +155,7 @@ Use `openai.ImageUrl.dataUrlAlloc(allocator, "image/png", bytes)` to build one.
 
 ```zig
 const inputs = [_][]const u8{ "Hello", "Foo", "Bar" };
-const response = try openai.embeddings.create(.{
+const response = try client.embeddings.create(.{
     .model = "text-embedding-3-small",
     .input = &inputs,
 });
@@ -165,12 +168,30 @@ std.log.debug("Model: {s}\nNumber of Embeddings: {d}\nDimensions of Embeddings: 
 });
 ```
 
+### Files
+
+```zig
+var response = try client.files.create(.{
+    .file = .{
+        .filename = "training.jsonl",
+        .content = file_bytes,
+        .content_type = "application/jsonl",
+    },
+    .purpose = .@"fine-tune",
+});
+defer response.deinit();
+
+std.log.debug("Uploaded file: {s}", .{response.id});
+```
+
+`files.create` sends `multipart/form-data`. Optional expiration metadata is supported with `.expires_after`.
+
 ### Models
 
 #### Get model details
 
 ```zig
-var response = try openai.models.retrieve("gpt-4o");
+var response = try client.models.retrieve("gpt-4o");
 defer response.deinit();
 std.log.debug("Model is owned by '{s}'", .{response.owned_by});
 ```
@@ -178,7 +199,7 @@ std.log.debug("Model is owned by '{s}'", .{response.owned_by});
 #### List all models
 
 ```zig
-var response = try openai.models.list();
+var response = try client.models.list();
 defer response.deinit();
 std.log.debug("The first model you have available is '{s}'", .{response.data[0].id});
 ```
@@ -219,5 +240,7 @@ Contributions are welcome and encouraged! Submit an issue for any bugs/feature r
 ## Building Docs
 
 ```bash
+zig build
+zig build test
 zig build docs
 ```

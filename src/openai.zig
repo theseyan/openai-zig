@@ -24,6 +24,7 @@ pub const client = @import("client.zig");
 pub const models = @import("models.zig");
 pub const completions = @import("completions.zig");
 pub const embeddings = @import("embeddings.zig");
+pub const files = @import("files.zig");
 /// Contains helper functions for creating your own deserializable types.
 pub const json = @import("json.zig");
 
@@ -34,6 +35,11 @@ pub const ChatMessageContent = completions.ChatMessageContent;
 pub const ChatContentPart = completions.ChatContentPart;
 pub const ImageUrl = completions.ImageUrl;
 pub const ImageDetail = completions.ImageDetail;
+pub const FileCreateRequest = files.FileCreateRequest;
+pub const FileExpiresAfter = files.FileExpiresAfter;
+pub const FileObject = files.FileObject;
+pub const FilePurpose = files.FilePurpose;
+pub const FileUpload = files.FileUpload;
 
 test {
     std.testing.refAllDecls(@This());
