@@ -54,7 +54,9 @@ pub fn main(init: std.process.Init) !void {
     });
     // This will free all the memory allocated for the response
     defer chat_response.deinit();
-    std.log.debug("{s}", .{chat_response.choices[0].message.content});
+    if (chat_response.choices[0].message.content) |content| {
+        std.log.debug("{s}", .{content});
+    }
 
     // ================== Chat Completions with Streaming ====================
     var stream = try client.chat.completions.createStream(.{
@@ -69,7 +71,9 @@ pub fn main(init: std.process.Init) !void {
     defer stream.deinit();
     std.debug.print("\n", .{});
     while (try stream.next()) |val| {
-        std.debug.print("{s}", .{val.choices[0].delta.content});
+        if (val.choices[0].delta.content) |content| {
+            std.debug.print("{s}", .{content});
+        }
     }
     std.debug.print("\n", .{});
 

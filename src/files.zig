@@ -60,10 +60,10 @@ pub const Files = struct {
         const allocator = self.openai.allocator;
         var boundary_buffer: [64]u8 = undefined;
         const boundary = try multipart.makeBoundary(&boundary_buffer, self.openai.io);
-        const content_type = try multipart.contentTypeAlloc(allocator, boundary);
+        const content_type = try multipart.contentType(allocator, boundary);
         defer allocator.free(content_type);
 
-        const body = try buildCreateBodyAlloc(allocator, boundary, request);
+        const body = try buildCreateBody(allocator, boundary, request);
         defer allocator.free(body);
 
         return self.openai.requestMultipart(.{
@@ -74,7 +74,7 @@ pub const Files = struct {
     }
 };
 
-fn buildCreateBodyAlloc(allocator: std.mem.Allocator, boundary: []const u8, request: FileCreateRequest) ![]u8 {
+fn buildCreateBody(allocator: std.mem.Allocator, boundary: []const u8, request: FileCreateRequest) ![]u8 {
     var fields = std.ArrayList(multipart.Field).empty;
     defer fields.deinit(allocator);
 
@@ -104,12 +104,12 @@ fn buildCreateBodyAlloc(allocator: std.mem.Allocator, boundary: []const u8, requ
         },
     };
 
-    return multipart.buildAlloc(allocator, boundary, fields.items, &file_parts);
+    return multipart.build(allocator, boundary, fields.items, &file_parts);
 }
 
 test "build file create multipart body" {
     const allocator = std.testing.allocator;
-    const body = try buildCreateBodyAlloc(allocator, "test-boundary", .{
+    const body = try buildCreateBody(allocator, "test-boundary", .{
         .file = .{
             .filename = "README.md",
             .content = "Example data",

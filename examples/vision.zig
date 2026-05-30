@@ -30,5 +30,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer response.deinit();
 
-    std.log.info("{s}", .{response.choices[0].message.content});
+    if (response.choices[0].message.content) |content| {
+        std.log.info("{s}", .{content});
+    }
 }

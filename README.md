@@ -12,7 +12,7 @@
 - An easy-to-use interface, similar to `openai-python`
 - Built-in retry logic
 - Environment variable config support for API keys, organization IDs, project IDs, and base URLs
-- Chat completions, including streaming responses and image understanding
+- Chat completions, including streaming responses, image understanding, and tool calling
 - Embeddings
 - Models
 - Files upload with `multipart/form-data`
@@ -99,7 +99,9 @@ var response = try client.chat.completions.create(.{
 });
 // This will free all the memory allocated for the response
 defer response.deinit();
-std.log.debug("{s}", .{response.choices[0].message.content});
+if (response.choices[0].message.content) |content| {
+    std.log.debug("{s}", .{content});
+}
 ```
 
 #### Streamed Response
@@ -118,7 +120,9 @@ defer stream.deinit();
 
 std.debug.print("\n", .{});
 while (try stream.next()) |val| {
-    std.debug.print("{s}", .{val.choices[0].delta.content});
+    if (val.choices[0].delta.content) |content| {
+        std.debug.print("{s}", .{content});
+    }
 }
 std.debug.print("\n", .{});
 ```
@@ -149,7 +153,74 @@ defer response.deinit();
 ```
 
 For local image bytes, pass a data URL in `ImageUrl.url`, such as `data:image/png;base64,...`.
-Use `openai.ImageUrl.dataUrlAlloc(allocator, "image/png", bytes)` to build one.
+Use `openai.ImageUrl.dataUrl(allocator, "image/png", bytes)` to build one.
+
+#### Tool Calling
+
+```zig
+const ChatTool = openai.ChatTool;
+const ToolCall = openai.ToolCall;
+
+const tools = [_]ChatTool{
+    .{
+        .function = .{
+            .name = "get_weather",
+            .description = "Get weather for a location",
+            .parameters = schema_json_value,
+        },
+    },
+};
+
+var response = try client.chat.completions.create(.{
+    .model = "gpt-4o-mini",
+    .messages = &[_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "Weather in Paris?" },
+        },
+    },
+    .tools = &tools,
+    .tool_choice = .auto,
+});
+defer response.deinit();
+
+if (response.choices[0].message.tool_calls) |tool_calls| {
+    const call = tool_calls[0];
+    if (call.function) |function| {
+        std.log.debug("Call {s} with {s}", .{ function.name, function.arguments });
+    }
+}
+```
+
+Send tool results back with a tool message:
+
+```zig
+const tool_calls = [_]ToolCall{
+    .{
+        .id = "call_123",
+        .function = .{
+            .name = "get_weather",
+            .arguments = "{\"location\":\"Paris\"}",
+        },
+    },
+};
+
+var follow_up = try client.chat.completions.create(.{
+    .model = "gpt-4o-mini",
+    .messages = &[_]ChatMessage{
+        .{
+            .role = "assistant",
+            .tool_calls = &tool_calls,
+        },
+        .{
+            .role = "tool",
+            .content = .{ .text = "{\"temperature\":\"18C\"}" },
+            .tool_call_id = "call_123",
+        },
+    },
+});
+defer follow_up.deinit();
+```
 
 ### Embeddings
 

@@ -30,11 +30,11 @@ pub fn makeBoundary(buffer: []u8, io: std.Io) ![]const u8 {
     return buffer[0 .. prefix.len + random_len * 2];
 }
 
-pub fn contentTypeAlloc(allocator: std.mem.Allocator, boundary: []const u8) ![]u8 {
+pub fn contentType(allocator: std.mem.Allocator, boundary: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "multipart/form-data; boundary={s}", .{boundary});
 }
 
-pub fn buildAlloc(allocator: std.mem.Allocator, boundary: []const u8, fields: []const Field, files: []const File) ![]u8 {
+pub fn build(allocator: std.mem.Allocator, boundary: []const u8, fields: []const Field, files: []const File) ![]u8 {
     var body = std.Io.Writer.Allocating.init(allocator);
     errdefer body.deinit();
 
@@ -114,7 +114,7 @@ test "build multipart body" {
         },
     };
 
-    const body = try buildAlloc(allocator, "test-boundary", &fields, &files);
+    const body = try build(allocator, "test-boundary", &fields, &files);
     defer allocator.free(body);
 
     try std.testing.expectEqualStrings(

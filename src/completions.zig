@@ -16,7 +16,7 @@ pub const ImageUrl = struct {
 
     /// Allocates a `data:<mime_type>;base64,...` URL for local image bytes.
     /// Caller owns the returned slice.
-    pub fn dataUrlAlloc(allocator: std.mem.Allocator, mime_type: []const u8, bytes: []const u8) ![]u8 {
+    pub fn dataUrl(allocator: std.mem.Allocator, mime_type: []const u8, bytes: []const u8) ![]u8 {
         const data_prefix = "data:";
         const base64_prefix = ";base64,";
         const prefix_len = data_prefix.len + mime_type.len + base64_prefix.len;
@@ -72,9 +72,148 @@ pub const ChatMessageContent = union(enum) {
     }
 };
 
+pub const ChatToolFunction = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    parameters: ?std.json.Value = null,
+    strict: ?bool = null,
+};
+
+pub const ChatCustomTool = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    format: ?std.json.Value = null,
+};
+
+pub const ChatTool = union(enum) {
+    function: ChatToolFunction,
+    custom: ChatCustomTool,
+
+    pub fn jsonStringify(self: ChatTool, writer: anytype) !void {
+        try writer.beginObject();
+        switch (self) {
+            .function => |function| {
+                try writer.objectField("type");
+                try writer.write("function");
+                try writer.objectField("function");
+                try writer.write(function);
+            },
+            .custom => |custom| {
+                try writer.objectField("type");
+                try writer.write("custom");
+                try writer.objectField("custom");
+                try writer.write(custom);
+            },
+        }
+        try writer.endObject();
+    }
+};
+
+pub const ChatAllowedTools = struct {
+    mode: []const u8,
+    tools: []const std.json.Value,
+};
+
+pub const ChatToolChoice = union(enum) {
+    none,
+    auto,
+    required,
+    function: []const u8,
+    custom: []const u8,
+    allowed_tools: ChatAllowedTools,
+
+    pub fn jsonStringify(self: ChatToolChoice, writer: anytype) !void {
+        switch (self) {
+            .none => try writer.write("none"),
+            .auto => try writer.write("auto"),
+            .required => try writer.write("required"),
+            .function => |name| {
+                try writer.beginObject();
+                try writer.objectField("type");
+                try writer.write("function");
+                try writer.objectField("function");
+                try writer.beginObject();
+                try writer.objectField("name");
+                try writer.write(name);
+                try writer.endObject();
+                try writer.endObject();
+            },
+            .custom => |name| {
+                try writer.beginObject();
+                try writer.objectField("type");
+                try writer.write("custom");
+                try writer.objectField("custom");
+                try writer.beginObject();
+                try writer.objectField("name");
+                try writer.write(name);
+                try writer.endObject();
+                try writer.endObject();
+            },
+            .allowed_tools => |allowed_tools| {
+                try writer.beginObject();
+                try writer.objectField("type");
+                try writer.write("allowed_tools");
+                try writer.objectField("allowed_tools");
+                try writer.write(allowed_tools);
+                try writer.endObject();
+            },
+        }
+    }
+};
+
+pub const ToolCallFunction = struct {
+    name: []const u8,
+    arguments: []const u8,
+};
+
+pub const ToolCallCustom = struct {
+    name: []const u8,
+    input: []const u8,
+};
+
+pub const ToolCall = struct {
+    id: []const u8,
+    type: []const u8 = "function",
+    function: ?ToolCallFunction = null,
+    custom: ?ToolCallCustom = null,
+
+    pub fn jsonStringify(self: ToolCall, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("id");
+        try writer.write(self.id);
+        try writer.objectField("type");
+        try writer.write(if (self.custom != null and self.function == null) "custom" else self.type);
+        if (self.function) |function| {
+            try writer.objectField("function");
+            try writer.write(function);
+        }
+        if (self.custom) |custom| {
+            try writer.objectField("custom");
+            try writer.write(custom);
+        }
+        try writer.endObject();
+    }
+};
+
+pub const ToolCallDelta = struct {
+    index: usize,
+    id: ?[]const u8 = null,
+    type: ?[]const u8 = null,
+    function: ?struct {
+        name: ?[]const u8 = null,
+        arguments: ?[]const u8 = null,
+    } = null,
+    custom: ?struct {
+        name: ?[]const u8 = null,
+        input: ?[]const u8 = null,
+    } = null,
+};
+
 pub const ChatMessage = struct {
     role: []const u8,
-    content: ChatMessageContent,
+    content: ?ChatMessageContent = null,
+    tool_calls: ?[]const ToolCall = null,
+    tool_call_id: ?[]const u8 = null,
 };
 
 /// Request for chat completions
@@ -171,18 +310,15 @@ pub const ChatCompletionsRequest = struct {
     /// Defaults to 1.0 if left null
     top_p: ?f32 = null,
 
-    // Optional: List of tools (functions) the model may call
-    // TODO: implement tools parameter as array of structs
-    // tools: []Tool,
+    /// Optional: List of tools the model may call.
+    tools: ?[]const ChatTool = null,
 
-    // Optional: Controls which tool is called by the model
-    // TODO: implement tool_choice parameter as union
-    // tool_choice: ToolChoice,
+    /// Optional: Controls which tool is called by the model.
+    tool_choice: ?ChatToolChoice = null,
 
-    // Optional: Enable parallel function calling during tool use
-    // Defaults to true
-    // TODO: implement parallel_tool_calls
-    // parallel_tool_calls: bool = true,
+    /// Optional: Enable parallel function calling during tool use.
+    /// Defaults to true if left null.
+    parallel_tool_calls: ?bool = null,
 
     /// Optional: Unique identifier for end-user
     user: ?[]const u8 = null,
@@ -190,9 +326,9 @@ pub const ChatCompletionsRequest = struct {
 
 pub const Message = struct {
     role: []const u8,
-    content: []const u8,
+    content: ?[]const u8 = null,
+    tool_calls: ?[]const ToolCall = null,
     // refusal: ?[]const u8 = null,
-    // function_call: ?[]const u8 = null,
 };
 
 /// A streamed chat completions payload
@@ -201,12 +337,14 @@ pub const ChatCompletionChunk = struct {
     object: []const u8,
     created: f64,
     model: []const u8,
-    service_tier: []const u8,
-    system_fingerprint: []const u8,
+    service_tier: ?[]const u8 = null,
+    system_fingerprint: ?[]const u8 = null,
     choices: []const struct {
         index: usize,
         delta: struct {
-            content: []const u8 = "",
+            role: ?[]const u8 = null,
+            content: ?[]const u8 = null,
+            tool_calls: ?[]const ToolCallDelta = null,
         },
         logprobs: ?[]const u8 = null,
         finish_reason: ?[]const u8 = null,
@@ -240,7 +378,7 @@ pub const ChatCompletion = struct {
             rejected_prediction_tokens: ?u64 = null,
         } = null,
     },
-    service_tier: []const u8,
+    service_tier: ?[]const u8 = null,
     system_fingerprint: ?[]const u8 = null,
     arena: json.Arena = .{},
 
@@ -266,7 +404,7 @@ pub const Completions = struct {
     /// The caller is also responsible for calling deinit() on the response to free all allocated memory.
     pub fn create(self: *Completions, request: ChatCompletionsRequest) !ChatCompletion {
         const allocator = self.openai.allocator;
-        const body = try json.stringifyAlloc(allocator, request, .{
+        const body = try json.stringify(allocator, request, .{
             .emit_null_optional_fields = false,
         });
         defer allocator.free(body);
@@ -285,7 +423,7 @@ pub const Completions = struct {
         var payload = request;
         payload.stream = true;
 
-        const body = try json.stringifyAlloc(allocator, payload, .{
+        const body = try json.stringify(allocator, payload, .{
             .emit_null_optional_fields = false,
         });
         defer allocator.free(body);
@@ -310,7 +448,7 @@ test "chat message serializes text content as a string" {
         .messages = &messages,
     };
 
-    const body = try json.stringifyAlloc(allocator, request, .{
+    const body = try json.stringify(allocator, request, .{
         .emit_null_optional_fields = false,
     });
     defer allocator.free(body);
@@ -340,7 +478,7 @@ test "chat message serializes image content parts" {
         .messages = &messages,
     };
 
-    const body = try json.stringifyAlloc(allocator, request, .{
+    const body = try json.stringify(allocator, request, .{
         .emit_null_optional_fields = false,
     });
     defer allocator.free(body);
@@ -352,8 +490,348 @@ test "chat message serializes image content parts" {
 
 test "image URL helper builds data URL" {
     const allocator = std.testing.allocator;
-    const url = try ImageUrl.dataUrlAlloc(allocator, "image/png", "hello");
+    const url = try ImageUrl.dataUrl(allocator, "image/png", "hello");
     defer allocator.free(url);
 
     try std.testing.expectEqualStrings("data:image/png;base64,aGVsbG8=", url);
+}
+
+test "chat request serializes tools and function tool choice" {
+    const allocator = std.testing.allocator;
+    var schema_arena = std.heap.ArenaAllocator.init(allocator);
+    defer schema_arena.deinit();
+
+    const parameters = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        schema_arena.allocator(),
+        \\{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}
+    ,
+        .{},
+    );
+    const tools = [_]ChatTool{
+        .{
+            .function = .{
+                .name = "get_weather",
+                .description = "Get weather for a location",
+                .parameters = parameters,
+            },
+        },
+    };
+    const messages = [_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "Weather in Paris?" },
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+        .tools = &tools,
+        .tool_choice = .{ .function = "get_weather" },
+        .parallel_tool_calls = true,
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Weather in Paris?"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather for a location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"tool_choice":{"type":"function","function":{"name":"get_weather"}},"parallel_tool_calls":true}
+    , body);
+}
+
+test "tool choice serializes string choices" {
+    const allocator = std.testing.allocator;
+    const choices = [_]ChatToolChoice{ .auto, .none, .required };
+    const expected = [_][]const u8{ "\"auto\"", "\"none\"", "\"required\"" };
+
+    for (choices, expected) |choice, value| {
+        const body = try json.stringify(allocator, choice, .{});
+        defer allocator.free(body);
+        try std.testing.expectEqualStrings(value, body);
+    }
+}
+
+test "chat request serializes custom tools and allowed tool choice" {
+    const allocator = std.testing.allocator;
+    var schema_arena = std.heap.ArenaAllocator.init(allocator);
+    defer schema_arena.deinit();
+
+    const format = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        schema_arena.allocator(),
+        \\{"type":"grammar","grammar":{"definition":"start: /[a-z]+/","syntax":"lark"}}
+    ,
+        .{},
+    );
+    const allowed_tool = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        schema_arena.allocator(),
+        \\{"type":"custom","custom":{"name":"grammar_tool"}}
+    ,
+        .{},
+    );
+    const tools = [_]ChatTool{
+        .{ .custom = .{
+            .name = "grammar_tool",
+            .description = "Parse constrained input",
+            .format = format,
+        } },
+    };
+    const allowed_tools = [_]std.json.Value{allowed_tool};
+    const messages = [_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "Parse abc" },
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+        .tools = &tools,
+        .tool_choice = .{ .allowed_tools = .{
+            .mode = "required",
+            .tools = &allowed_tools,
+        } },
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Parse abc"}],"tools":[{"type":"custom","custom":{"name":"grammar_tool","description":"Parse constrained input","format":{"type":"grammar","grammar":{"definition":"start: /[a-z]+/","syntax":"lark"}}}}],"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"custom","custom":{"name":"grammar_tool"}}]}}}
+    , body);
+}
+
+test "tool choice serializes named custom tool" {
+    const allocator = std.testing.allocator;
+    const body = try json.stringify(allocator, ChatToolChoice{ .custom = "grammar_tool" }, .{});
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"type":"custom","custom":{"name":"grammar_tool"}}
+    , body);
+}
+
+test "chat messages serialize assistant tool calls and tool results" {
+    const allocator = std.testing.allocator;
+    const tool_calls = [_]ToolCall{
+        .{
+            .id = "call_123",
+            .function = .{
+                .name = "get_weather",
+                .arguments = "{\"location\":\"Paris\"}",
+            },
+        },
+    };
+    const messages = [_]ChatMessage{
+        .{
+            .role = "assistant",
+            .tool_calls = &tool_calls,
+        },
+        .{
+            .role = "tool",
+            .content = .{ .text = "{\"temperature\":\"18C\"}" },
+            .tool_call_id = "call_123",
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"assistant","tool_calls":[{"id":"call_123","type":"function","function":{"name":"get_weather","arguments":"{\"location\":\"Paris\"}"}}]},{"role":"tool","content":"{\"temperature\":\"18C\"}","tool_call_id":"call_123"}]}
+    , body);
+}
+
+test "chat messages serialize custom assistant tool calls" {
+    const allocator = std.testing.allocator;
+    const tool_calls = [_]ToolCall{
+        .{
+            .id = "call_123",
+            .custom = .{
+                .name = "grammar_tool",
+                .input = "abc",
+            },
+        },
+    };
+    const messages = [_]ChatMessage{
+        .{
+            .role = "assistant",
+            .tool_calls = &tool_calls,
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"assistant","tool_calls":[{"id":"call_123","type":"custom","custom":{"name":"grammar_tool","input":"abc"}}]}]}
+    , body);
+}
+
+test "chat completion parses tool calls" {
+    const allocator = std.testing.allocator;
+    const response = try json.deserializeStructWithArena(ChatCompletion, allocator,
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "message": {
+        \\      "role": "assistant",
+        \\      "content": null,
+        \\      "tool_calls": [{
+        \\        "id": "call_123",
+        \\        "type": "function",
+        \\        "function": {
+        \\          "name": "get_weather",
+        \\          "arguments": "{\"location\":\"Paris\"}"
+        \\        }
+        \\      }]
+        \\    },
+        \\    "finish_reason": "tool_calls"
+        \\  }],
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 5,
+        \\    "total_tokens": 15
+        \\  },
+        \\  "service_tier": "default"
+        \\}
+    );
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("tool_calls", response.choices[0].finish_reason);
+    try std.testing.expect(response.choices[0].message.content == null);
+    const tool_call = response.choices[0].message.tool_calls.?[0];
+    try std.testing.expectEqualStrings("call_123", tool_call.id);
+    try std.testing.expectEqualStrings("get_weather", tool_call.function.?.name);
+    try std.testing.expectEqualStrings("{\"location\":\"Paris\"}", tool_call.function.?.arguments);
+}
+
+test "chat completion parses custom tool calls" {
+    const allocator = std.testing.allocator;
+    const response = try json.deserializeStructWithArena(ChatCompletion, allocator,
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "message": {
+        \\      "role": "assistant",
+        \\      "content": null,
+        \\      "tool_calls": [{
+        \\        "id": "call_123",
+        \\        "type": "custom",
+        \\        "custom": {
+        \\          "name": "grammar_tool",
+        \\          "input": "abc"
+        \\        }
+        \\      }]
+        \\    },
+        \\    "finish_reason": "tool_calls"
+        \\  }],
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 5,
+        \\    "total_tokens": 15
+        \\  }
+        \\}
+    );
+    defer response.deinit();
+
+    const tool_call = response.choices[0].message.tool_calls.?[0];
+    try std.testing.expectEqualStrings("custom", tool_call.type);
+    try std.testing.expectEqualStrings("grammar_tool", tool_call.custom.?.name);
+    try std.testing.expectEqualStrings("abc", tool_call.custom.?.input);
+    try std.testing.expect(response.service_tier == null);
+}
+
+test "chat completion chunk parses partial tool call deltas" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const chunk = try std.json.parseFromSliceLeaky(ChatCompletionChunk, arena.allocator(),
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion.chunk",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "service_tier": "default",
+        \\  "system_fingerprint": "fp_123",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "delta": {
+        \\      "tool_calls": [{
+        \\        "index": 0,
+        \\        "id": "call_123",
+        \\        "type": "function",
+        \\        "function": {
+        \\          "name": "get_weather",
+        \\          "arguments": "{\"location\""
+        \\        }
+        \\      }]
+        \\    },
+        \\    "finish_reason": null
+        \\  }]
+        \\}
+    ,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    );
+
+    const delta = chunk.choices[0].delta.tool_calls.?[0];
+    try std.testing.expectEqual(@as(usize, 0), delta.index);
+    try std.testing.expectEqualStrings("call_123", delta.id.?);
+    try std.testing.expectEqualStrings("get_weather", delta.function.?.name.?);
+    try std.testing.expectEqualStrings("{\"location\"", delta.function.?.arguments.?);
+}
+
+test "chat completion chunk accepts missing and null metadata" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const chunk = try std.json.parseFromSliceLeaky(ChatCompletionChunk, arena.allocator(),
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion.chunk",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "service_tier": null,
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "delta": {
+        \\      "role": "assistant"
+        \\    },
+        \\    "finish_reason": null
+        \\  }]
+        \\}
+    ,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    );
+
+    try std.testing.expect(chunk.service_tier == null);
+    try std.testing.expect(chunk.system_fingerprint == null);
+    try std.testing.expectEqualStrings("assistant", chunk.choices[0].delta.role.?);
 }

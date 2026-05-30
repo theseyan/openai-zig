@@ -9,7 +9,7 @@ pub const Arena = struct {
     }
 };
 
-pub fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
+pub fn stringify(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
     try std.json.Stringify.value(value, options, &writer.writer);
