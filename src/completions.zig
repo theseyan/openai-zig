@@ -216,6 +216,120 @@ pub const ChatMessage = struct {
     tool_call_id: ?[]const u8 = null,
 };
 
+pub const MetadataEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const Metadata = struct {
+    entries: []const MetadataEntry,
+
+    pub fn jsonStringify(self: Metadata, writer: anytype) !void {
+        try writer.beginObject();
+        for (self.entries) |entry| {
+            try writer.objectField(entry.key);
+            try writer.write(entry.value);
+        }
+        try writer.endObject();
+    }
+};
+
+pub const LogitBiasEntry = struct {
+    token: []const u8,
+    bias: i32,
+};
+
+pub const LogitBias = struct {
+    entries: []const LogitBiasEntry,
+
+    pub fn jsonStringify(self: LogitBias, writer: anytype) !void {
+        try writer.beginObject();
+        for (self.entries) |entry| {
+            try writer.objectField(entry.token);
+            try writer.write(entry.bias);
+        }
+        try writer.endObject();
+    }
+};
+
+pub const PredictionContentPart = struct {
+    type: []const u8 = "text",
+    text: []const u8,
+};
+
+pub const PredictionContentValue = union(enum) {
+    text: []const u8,
+    parts: []const PredictionContentPart,
+
+    pub fn jsonStringify(self: PredictionContentValue, writer: anytype) !void {
+        switch (self) {
+            .text => |text| try writer.write(text),
+            .parts => |parts| try writer.write(parts),
+        }
+    }
+};
+
+pub const PredictionContent = struct {
+    type: []const u8 = "content",
+    content: PredictionContentValue,
+};
+
+pub const AudioVoice = union(enum) {
+    name: []const u8,
+    id: []const u8,
+
+    pub fn jsonStringify(self: AudioVoice, writer: anytype) !void {
+        switch (self) {
+            .name => |name| try writer.write(name),
+            .id => |id| {
+                try writer.beginObject();
+                try writer.objectField("id");
+                try writer.write(id);
+                try writer.endObject();
+            },
+        }
+    }
+};
+
+pub const AudioConfig = struct {
+    format: []const u8,
+    voice: AudioVoice,
+};
+
+pub const ResponseFormatJsonSchema = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    schema: ?std.json.Value = null,
+    strict: ?bool = null,
+};
+
+pub const ResponseFormat = union(enum) {
+    text,
+    json_object,
+    json_schema: ResponseFormatJsonSchema,
+
+    pub fn jsonStringify(self: ResponseFormat, writer: anytype) !void {
+        try writer.beginObject();
+        switch (self) {
+            .text => {
+                try writer.objectField("type");
+                try writer.write("text");
+            },
+            .json_object => {
+                try writer.objectField("type");
+                try writer.write("json_object");
+            },
+            .json_schema => |schema| {
+                try writer.objectField("type");
+                try writer.write("json_schema");
+                try writer.objectField("json_schema");
+                try writer.write(schema);
+            },
+        }
+        try writer.endObject();
+    }
+};
+
 /// Request for chat completions
 pub const ChatCompletionsRequest = struct {
     /// Required: ID of the model to use
@@ -236,18 +350,16 @@ pub const ChatCompletionsRequest = struct {
     /// Defaults to "medium" if left null,
     reasoning_effort: ?[]const u8 = null,
 
-    // Optional: Set of key-value pairs for storing additional information
-    // TODO: implement metadata parameter as StringHashMap
-    // metadata: StringHashMap([]const u8),
+    /// Optional: Set of key-value pairs for storing additional information.
+    metadata: ?Metadata = null,
 
     /// Optional: Number between -2.0 and 2.0
     /// Positive values penalize new tokens based on their existing frequency
     /// Defaults to 0.0 if left null.
     frequency_penalty: ?f32 = null,
 
-    // Optional: Modify likelihood of specified tokens appearing in completion
-    // TODO: implement logit_bias parameter as IntegerHashMap
-    // logit_bias: IntegerHashMap(f32),
+    /// Optional: Modify likelihood of specified tokens appearing in completion.
+    logit_bias: ?LogitBias = null,
 
     /// Optional: Whether to return log probabilities of output tokens
     /// Defaults to false
@@ -270,24 +382,21 @@ pub const ChatCompletionsRequest = struct {
 
     /// Optional: Output types for model to generate (e.g. ["text"], ["text", "audio"])
     /// Defaults to ["text"]
-    modalities: ?[][]const u8 = null,
+    modalities: ?[]const []const u8 = null,
 
-    // Optional: Configuration for Predicted Output
-    // TODO: implement prediction parameter as struct
-    // prediction: PredictionConfig,
+    /// Optional: Configuration for predicted output.
+    prediction: ?PredictionContent = null,
 
-    // Optional: Parameters for audio output
-    // TODO: implement audio parameter as struct
-    // audio: AudioConfig,
+    /// Optional: Parameters for audio output.
+    audio: ?AudioConfig = null,
 
     /// Optional: Number between -2.0 and 2.0
     /// Positive values penalize new tokens based on presence in text
     /// Defaults to 0.0 if left null
     presence_penalty: ?f32 = null,
 
-    // Optional: Format specification for model output
-    // TODO: implement response_format parameter as union
-    // response_format: ResponseFormat,
+    /// Optional: Format specification for model output.
+    response_format: ?ResponseFormat = null,
 
     /// Optional: Seed for deterministic sampling
     seed: ?i64 = null,
@@ -494,6 +603,124 @@ test "image URL helper builds data URL" {
     defer allocator.free(url);
 
     try std.testing.expectEqualStrings("data:image/png;base64,aGVsbG8=", url);
+}
+
+test "chat request serializes metadata logit bias prediction and audio" {
+    const allocator = std.testing.allocator;
+    const messages = [_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "hello" },
+        },
+    };
+    const metadata_entries = [_]MetadataEntry{
+        .{ .key = "app", .value = "openai-zig" },
+    };
+    const logit_bias_entries = [_]LogitBiasEntry{
+        .{ .token = "123", .bias = -100 },
+        .{ .token = "456", .bias = 42 },
+    };
+    const modalities = [_][]const u8{ "text", "audio" };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+        .metadata = .{ .entries = &metadata_entries },
+        .logit_bias = .{ .entries = &logit_bias_entries },
+        .modalities = &modalities,
+        .prediction = .{
+            .content = .{ .text = "static output" },
+        },
+        .audio = .{
+            .format = "mp3",
+            .voice = .{ .name = "nova" },
+        },
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"metadata":{"app":"openai-zig"},"logit_bias":{"123":-100,"456":42},"modalities":["text","audio"],"prediction":{"type":"content","content":"static output"},"audio":{"format":"mp3","voice":"nova"}}
+    , body);
+}
+
+test "chat request serializes prediction text parts and custom audio voice" {
+    const allocator = std.testing.allocator;
+    const messages = [_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "hello" },
+        },
+    };
+    const parts = [_]PredictionContentPart{
+        .{ .text = "part one" },
+        .{ .text = "part two" },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+        .prediction = .{
+            .content = .{ .parts = &parts },
+        },
+        .audio = .{
+            .format = "wav",
+            .voice = .{ .id = "voice_1234" },
+        },
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"prediction":{"type":"content","content":[{"type":"text","text":"part one"},{"type":"text","text":"part two"}]},"audio":{"format":"wav","voice":{"id":"voice_1234"}}}
+    , body);
+}
+
+test "response format serializes text and json object" {
+    const allocator = std.testing.allocator;
+    const formats = [_]ResponseFormat{ .text, .json_object };
+    const expected = [_][]const u8{ "{\"type\":\"text\"}", "{\"type\":\"json_object\"}" };
+
+    for (formats, expected) |format, value| {
+        const body = try json.stringify(allocator, format, .{
+            .emit_null_optional_fields = false,
+        });
+        defer allocator.free(body);
+        try std.testing.expectEqualStrings(value, body);
+    }
+}
+
+test "response format serializes json schema" {
+    const allocator = std.testing.allocator;
+    var schema_arena = std.heap.ArenaAllocator.init(allocator);
+    defer schema_arena.deinit();
+
+    const schema = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        schema_arena.allocator(),
+        \\{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
+    ,
+        .{},
+    );
+
+    const body = try json.stringify(allocator, ResponseFormat{
+        .json_schema = .{
+            .name = "answer_schema",
+            .schema = schema,
+            .strict = true,
+        },
+    }, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"type":"json_schema","json_schema":{"name":"answer_schema","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"strict":true}}
+    , body);
 }
 
 test "chat request serializes tools and function tool choice" {
