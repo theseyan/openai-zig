@@ -12,7 +12,7 @@
 - An easy-to-use interface, similar to `openai-python`
 - Built-in retry logic
 - Environment variable config support for API keys, organization IDs, project IDs, and base URLs
-- Chat completions, including streaming responses, image understanding, and tool calling
+- Chat completions, including streaming responses, image/audio/file inputs, and tool calling
 - Embeddings
 - Models
 - Files upload with `multipart/form-data`
@@ -154,6 +154,16 @@ defer response.deinit();
 
 For local image bytes, pass a data URL in `ImageUrl.url`, such as `data:image/png;base64,...`.
 Use `openai.ImageUrl.dataUrl(allocator, "image/png", bytes)` to build one.
+
+The same content-part API supports modern multimodal inputs:
+
+```zig
+const parts = [_]ChatContentPart{
+    .{ .text = "Summarize these inputs." },
+    .{ .input_audio = .{ .data = base64_wav, .format = "wav" } },
+    .{ .file = .{ .file_id = "file_abc123" } },
+};
+```
 
 #### Tool Calling
 

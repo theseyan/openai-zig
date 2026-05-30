@@ -36,9 +36,28 @@ pub const ImageUrl = struct {
     }
 };
 
+pub const InputAudio = struct {
+    /// Base64-encoded audio input.
+    data: []const u8,
+    /// Encoded audio format, currently "wav" or "mp3".
+    format: []const u8,
+};
+
+pub const ContentFile = struct {
+    /// Base64-encoded file data.
+    file_data: ?[]const u8 = null,
+    /// ID of an uploaded file to use as input.
+    file_id: ?[]const u8 = null,
+    /// Filename to associate with `file_data`.
+    filename: ?[]const u8 = null,
+};
+
 pub const ChatContentPart = union(enum) {
     text: []const u8,
     image_url: ImageUrl,
+    input_audio: InputAudio,
+    file: ContentFile,
+    refusal: []const u8,
 
     pub fn jsonStringify(self: ChatContentPart, writer: anytype) !void {
         try writer.beginObject();
@@ -54,6 +73,24 @@ pub const ChatContentPart = union(enum) {
                 try writer.write("image_url");
                 try writer.objectField("image_url");
                 try writer.write(image);
+            },
+            .input_audio => |audio| {
+                try writer.objectField("type");
+                try writer.write("input_audio");
+                try writer.objectField("input_audio");
+                try writer.write(audio);
+            },
+            .file => |file| {
+                try writer.objectField("type");
+                try writer.write("file");
+                try writer.objectField("file");
+                try writer.write(file);
+            },
+            .refusal => |refusal| {
+                try writer.objectField("type");
+                try writer.write("refusal");
+                try writer.objectField("refusal");
+                try writer.write(refusal);
             },
         }
         try writer.endObject();
@@ -209,9 +246,17 @@ pub const ToolCallDelta = struct {
     } = null,
 };
 
+pub const ChatMessageAudio = struct {
+    /// Unique identifier for a previous audio response from the model.
+    id: []const u8,
+};
+
 pub const ChatMessage = struct {
     role: []const u8,
     content: ?ChatMessageContent = null,
+    name: ?[]const u8 = null,
+    audio: ?ChatMessageAudio = null,
+    refusal: ?[]const u8 = null,
     tool_calls: ?[]const ToolCall = null,
     tool_call_id: ?[]const u8 = null,
 };
@@ -294,6 +339,25 @@ pub const AudioVoice = union(enum) {
 pub const AudioConfig = struct {
     format: []const u8,
     voice: AudioVoice,
+};
+
+pub const ChatCompletionAudio = struct {
+    id: []const u8,
+    data: []const u8,
+    expires_at: f64,
+    transcript: []const u8,
+};
+
+pub const MessageUrlCitation = struct {
+    end_index: u64,
+    start_index: u64,
+    title: []const u8,
+    url: []const u8,
+};
+
+pub const MessageAnnotation = struct {
+    type: []const u8,
+    url_citation: ?MessageUrlCitation = null,
 };
 
 pub const ResponseFormatJsonSchema = struct {
@@ -436,8 +500,10 @@ pub const ChatCompletionsRequest = struct {
 pub const Message = struct {
     role: []const u8,
     content: ?[]const u8 = null,
+    refusal: ?[]const u8 = null,
+    annotations: ?[]const MessageAnnotation = null,
+    audio: ?ChatCompletionAudio = null,
     tool_calls: ?[]const ToolCall = null,
-    // refusal: ?[]const u8 = null,
 };
 
 /// A streamed chat completions payload
@@ -453,6 +519,7 @@ pub const ChatCompletionChunk = struct {
         delta: struct {
             role: ?[]const u8 = null,
             content: ?[]const u8 = null,
+            refusal: ?[]const u8 = null,
             tool_calls: ?[]const ToolCallDelta = null,
         },
         logprobs: ?[]const u8 = null,
@@ -594,6 +661,73 @@ test "chat message serializes image content parts" {
 
     try std.testing.expectEqualStrings(
         \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},{"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}}]}]}
+    , body);
+}
+
+test "chat message serializes named audio and file content parts" {
+    const allocator = std.testing.allocator;
+    const parts = [_]ChatContentPart{
+        .{ .text = "Summarize these inputs." },
+        .{ .input_audio = .{
+            .data = "UklGRg==",
+            .format = "wav",
+        } },
+        .{ .file = .{
+            .file_id = "file_123",
+        } },
+        .{ .file = .{
+            .file_data = "SGVsbG8=",
+            .filename = "note.txt",
+        } },
+    };
+    const messages = [_]ChatMessage{
+        .{
+            .role = "user",
+            .name = "sayan",
+            .content = .{ .parts = &parts },
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"Summarize these inputs."},{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},{"type":"file","file":{"file_id":"file_123"}},{"type":"file","file":{"file_data":"SGVsbG8=","filename":"note.txt"}}],"name":"sayan"}]}
+    , body);
+}
+
+test "chat message serializes assistant audio reference and refusal content" {
+    const allocator = std.testing.allocator;
+    const parts = [_]ChatContentPart{
+        .{ .refusal = "I can't help with that." },
+    };
+    const messages = [_]ChatMessage{
+        .{
+            .role = "assistant",
+            .content = .{ .parts = &parts },
+            .name = "safety",
+            .audio = .{ .id = "audio_123" },
+            .refusal = "I can't help with that.",
+        },
+    };
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+    };
+
+    const body = try json.stringify(allocator, request, .{
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"model":"gpt-4o-mini","messages":[{"role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}],"name":"safety","audio":{"id":"audio_123"},"refusal":"I can't help with that."}]}
     , body);
 }
 
@@ -994,12 +1128,66 @@ test "chat completion parses custom tool calls" {
     try std.testing.expect(response.service_tier == null);
 }
 
+test "chat completion parses modern message response fields" {
+    const allocator = std.testing.allocator;
+    const response = try json.deserializeStructWithArena(ChatCompletion, allocator,
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-audio-preview",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "message": {
+        \\      "role": "assistant",
+        \\      "content": "Here is the citation.",
+        \\      "refusal": null,
+        \\      "annotations": [{
+        \\        "type": "url_citation",
+        \\        "url_citation": {
+        \\          "start_index": 12,
+        \\          "end_index": 20,
+        \\          "title": "Example",
+        \\          "url": "https://example.com"
+        \\        }
+        \\      }],
+        \\      "audio": {
+        \\        "id": "audio_123",
+        \\        "data": "UklGRg==",
+        \\        "expires_at": 1710003600,
+        \\        "transcript": "Here is the citation."
+        \\      }
+        \\    },
+        \\    "finish_reason": "stop"
+        \\  }],
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 5,
+        \\    "total_tokens": 15
+        \\  }
+        \\}
+    );
+    defer response.deinit();
+
+    const message = response.choices[0].message;
+    try std.testing.expectEqualStrings("Here is the citation.", message.content.?);
+    try std.testing.expect(message.refusal == null);
+    try std.testing.expectEqualStrings("audio_123", message.audio.?.id);
+    try std.testing.expectEqualStrings("Here is the citation.", message.audio.?.transcript);
+    const citation = message.annotations.?[0].url_citation.?;
+    try std.testing.expectEqual(@as(u64, 12), citation.start_index);
+    try std.testing.expectEqualStrings("Example", citation.title);
+    try std.testing.expectEqualStrings("https://example.com", citation.url);
+}
+
 test "chat completion chunk parses partial tool call deltas" {
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const chunk = try std.json.parseFromSliceLeaky(ChatCompletionChunk, arena.allocator(),
+    const chunk = try std.json.parseFromSliceLeaky(
+        ChatCompletionChunk,
+        arena.allocator(),
         \\{
         \\  "id": "chatcmpl_123",
         \\  "object": "chat.completion.chunk",
@@ -1034,12 +1222,44 @@ test "chat completion chunk parses partial tool call deltas" {
     try std.testing.expectEqualStrings("{\"location\"", delta.function.?.arguments.?);
 }
 
+test "chat completion chunk parses refusal deltas" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const chunk = try std.json.parseFromSliceLeaky(
+        ChatCompletionChunk,
+        arena.allocator(),
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion.chunk",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "delta": {
+        \\      "role": "assistant",
+        \\      "refusal": "I can't help"
+        \\    },
+        \\    "finish_reason": null
+        \\  }]
+        \\}
+    ,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    );
+
+    try std.testing.expectEqualStrings("assistant", chunk.choices[0].delta.role.?);
+    try std.testing.expectEqualStrings("I can't help", chunk.choices[0].delta.refusal.?);
+}
+
 test "chat completion chunk accepts missing and null metadata" {
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const chunk = try std.json.parseFromSliceLeaky(ChatCompletionChunk, arena.allocator(),
+    const chunk = try std.json.parseFromSliceLeaky(
+        ChatCompletionChunk,
+        arena.allocator(),
         \\{
         \\  "id": "chatcmpl_123",
         \\  "object": "chat.completion.chunk",
