@@ -81,12 +81,14 @@ pub fn main(init: std.process.Init) !void {
     const inputs = [_][]const u8{ "Hello", "Foo", "Bar" };
     const embeddings_response = try client.embeddings.create(.{
         .model = "text-embedding-3-small",
-        .input = &inputs,
+        .input = .{ .texts = &inputs },
+        .encoding_format = "float",
     });
     defer embeddings_response.deinit();
+    const vector = embeddings_response.data[0].embedding.float;
     std.log.debug("Model: {s}\nNumber of Embeddings: {d}\nDimensions of Embeddings: {d}", .{
         embeddings_response.model,
         embeddings_response.data.len,
-        embeddings_response.data[0].embedding.len,
+        vector.len,
     });
 }

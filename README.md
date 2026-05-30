@@ -311,14 +311,14 @@ if (response.choices[0].message.tool_calls) |tool_calls| {
 const inputs = [_][]const u8{ "Hello", "Foo", "Bar" };
 const response = try client.embeddings.create(.{
     .model = "text-embedding-3-small",
-    .input = &inputs,
+    .input = .{ .texts = &inputs },
+    .encoding_format = "float",
 });
 // Don't forget to free resources!
 defer response.deinit();
+const vector = response.data[0].embedding.float;
 std.log.debug("Model: {s}\nNumber of Embeddings: {d}\nDimensions of Embeddings: {d}", .{
-    response.model,
-    response.data.len,
-    response.data[0].embedding.len,
+    response.model, response.data.len, vector.len,
 });
 ```
 
@@ -374,6 +374,14 @@ std.log.debug("Model is owned by '{s}'", .{response.owned_by});
 var response = try client.models.list();
 defer response.deinit();
 std.log.debug("The first model you have available is '{s}'", .{response.data[0].id});
+```
+
+#### Delete a fine-tuned model
+
+```zig
+var deleted = try client.models.delete("ft:gpt-4o-mini:org:custom:abc");
+defer deleted.deinit();
+std.log.debug("Deleted: {}", .{deleted.deleted});
 ```
 
 ## Configuring Logging

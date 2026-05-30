@@ -68,6 +68,12 @@ pub const ToolCallFunction = completions.ToolCallFunction;
 pub const ToolError = tools.ToolError;
 pub const ToolMessages = tools.ToolMessages;
 pub const Tools = tools.Tools;
+pub const EmbeddingInput = embeddings.EmbeddingInput;
+pub const EmbeddingObject = embeddings.EmbeddingObject;
+pub const EmbeddingVector = embeddings.EmbeddingVector;
+pub const EmbeddingsRequest = embeddings.EmbeddingsRequest;
+pub const EmbeddingsResponse = embeddings.EmbeddingsResponse;
+pub const EmbeddingsUsage = embeddings.EmbeddingsUsage;
 pub const FileCreateRequest = files.FileCreateRequest;
 pub const FileDeleted = files.FileDeleted;
 pub const FileExpiresAfter = files.FileExpiresAfter;
@@ -77,6 +83,10 @@ pub const FileListResponse = files.FileListResponse;
 pub const FileObject = files.FileObject;
 pub const FilePurpose = files.FilePurpose;
 pub const FileUpload = files.FileUpload;
+pub const ListModelResponse = models.ListModelResponse;
+pub const ModelDeleted = models.ModelDeleted;
+pub const ModelObject = models.ModelObject;
+pub const ModelResponse = models.ModelResponse;
 
 test {
     std.testing.refAllDecls(@This());
