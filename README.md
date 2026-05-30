@@ -257,6 +257,24 @@ std.log.debug("Uploaded file: {s}", .{response.id});
 
 `files.create` sends `multipart/form-data`. Optional expiration metadata is supported with `.expires_after`.
 
+```zig
+var files = try client.files.list(.{
+    .purpose = "fine-tune",
+    .limit = 20,
+    .order = .desc,
+});
+defer files.deinit();
+
+var file = try client.files.retrieve(files.data[0].id);
+defer file.deinit();
+
+const contents = try client.files.content(file.id, 10 * 1024 * 1024);
+defer client.allocator.free(contents);
+
+var deleted = try client.files.delete(file.id);
+defer deleted.deinit();
+```
+
 ### Models
 
 #### Get model details

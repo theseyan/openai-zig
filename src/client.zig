@@ -470,6 +470,68 @@ pub const OpenAI = struct {
         unreachable;
     }
 
+    /// Makes a request and returns the raw response body. Caller owns the returned bytes.
+    pub fn requestRaw(self: *const OpenAI, options: OpenAIRequest, max_bytes: usize) ![]u8 {
+        const method = options.method;
+        const path = options.path;
+        const allocator = self.allocator;
+        const url_string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ self.base_url, path });
+        defer allocator.free(url_string);
+
+        const uri = try std.Uri.parse(url_string);
+        var http_client = std.http.Client{ .allocator = allocator, .io = self.io };
+        defer http_client.deinit();
+        var backoff: f32 = INITIAL_RETRY_DELAY;
+
+        for (0..self.max_retries + 1) |attempt| {
+            var req = try std.http.Client.request(&http_client, method, uri, .{
+                .headers = self.headers,
+                .extra_headers = self.extra_headers,
+                .redirect_behavior = .unhandled,
+            });
+            defer req.deinit();
+
+            if (options.json) |body| {
+                req.transfer_encoding = .{ .content_length = body.len };
+                var body_writer = try req.sendBodyUnflushed(&.{});
+                log.debug("{s}", .{body});
+                try body_writer.writer.writeAll(body);
+                try body_writer.end();
+                try req.connection.?.flush();
+            } else {
+                try req.sendBodiless();
+            }
+
+            var response = try req.receiveHead(&.{});
+            var transfer_buffer: [64 * 1024]u8 = undefined;
+            const reader = response.reader(&transfer_buffer);
+            const body = try reader.allocRemaining(allocator, .limited(max_bytes));
+
+            const status_int = @intFromEnum(response.head.status);
+            log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, response.head.status.phrase() orelse "Unknown" });
+            if (status_int < 200 or status_int >= 300) {
+                if (attempt != self.max_retries and status_int >= 429) {
+                    allocator.free(body);
+                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
+                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
+                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                } else {
+                    defer allocator.free(body);
+                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
+                        log.err("{s}", .{body});
+                        return OpenAIError.BadRequest;
+                    };
+                    defer err.deinit();
+                    log.info("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
+                    return getErrorFromStatus(response.head.status);
+                }
+            } else {
+                return body;
+            }
+        }
+        unreachable;
+    }
+
     /// Makes a multipart/form-data request to OpenAI. The caller owns `body` and `content_type`.
     pub fn requestMultipart(self: *const OpenAI, options: MultipartRequest, comptime ResponseType: ?type) !if (ResponseType) |T| T else void {
         const allocator = self.allocator;
