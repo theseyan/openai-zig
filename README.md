@@ -7,7 +7,7 @@
  A Zig client for the OpenAI API.
 </div>
 
-## ⭐️ Features ⭐️
+## Features
 
 - An easy-to-use interface, similar to `openai-python`
 - Built-in retry logic
@@ -203,16 +203,6 @@ var response = try client.models.list();
 defer response.deinit();
 std.log.debug("The first model you have available is '{s}'", .{response.data[0].id});
 ```
-
-## Zig 0.16 Notes
-
-openai-zig follows Zig 0.16's explicit IO style. `OpenAI.init` takes both an allocator and a `std.Io` value:
-
-```zig
-try OpenAI.init(allocator, io, .{ ... });
-```
-
-Environment variables are read from an optional `std.process.Environ.Map` passed as `.environ_map`. When using `std.process.Init`, Zig creates this map for you.
 
 ## Configuring Logging
 
