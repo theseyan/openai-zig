@@ -23,6 +23,7 @@ const log = std.log.scoped(.openai);
 
 const INITIAL_RETRY_DELAY = 0.5;
 const MAX_RETRY_DELAY = 8;
+pub const DEFAULT_USER_AGENT = "openai-zig/0.1.0";
 
 const ApiError = struct {
     message: []const u8,
@@ -151,6 +152,24 @@ fn getErrorFromStatus(status: std.http.Status) OpenAIError {
     };
 }
 
+fn handleErrorResponse(allocator: std.mem.Allocator, status: std.http.Status, body: []const u8) OpenAIError {
+    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
+        log.err("HTTP {d} {s}: {s}", .{ @intFromEnum(status), status.phrase() orelse "Unknown", body });
+        return getErrorFromStatus(status);
+    };
+    defer err.deinit();
+    log.err("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
+    return getErrorFromStatus(status);
+}
+
+fn classifyErrorResponse(allocator: std.mem.Allocator, status: std.http.Status, body: []const u8) OpenAIError {
+    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
+        return getErrorFromStatus(status);
+    };
+    defer err.deinit();
+    return getErrorFromStatus(status);
+}
+
 /// Options to be passed through to the `OpenAI.init` function.
 pub const OpenAIConfig = struct {
     /// Your OpenAI API key. If left null, it will attempt to read from the `OPENAI_API_KEY` environment variable.
@@ -163,6 +182,8 @@ pub const OpenAIConfig = struct {
     project: ?[]const u8 = null,
     /// The maximum number of retries the client will attempt. Defaults to `3`.
     max_retries: usize = 3,
+    /// User-Agent header sent with every request. Defaults to `openai-zig/0.1.0`.
+    user_agent: ?[]const u8 = null,
     /// Optional environment map used to load OpenAI API config when explicit fields are null.
     environ_map: ?*const std.process.Environ.Map = null,
 };
@@ -244,11 +265,13 @@ pub const OpenAI = struct {
         const base_url_value = configValue(config.base_url, env_map, "OPENAI_BASE_URL") orelse "https://api.openai.com/v1";
         const organization_value = configValue(config.organization, env_map, "OPENAI_ORG_ID");
         const project_value = configValue(config.project, env_map, "OPENAI_PROJECT_ID");
+        const user_agent_value = config.user_agent orelse DEFAULT_USER_AGENT;
 
         const api_key = try self.moveNullableString(api_key_value);
         const base_url = try self.moveNullableString(base_url_value);
         const organization = try self.moveNullableString(organization_value);
         const project = try self.moveNullableString(project_value);
+        const user_agent = try self.moveNullableString(user_agent_value);
 
         // init client config
         self.api_key = api_key orelse {
@@ -270,7 +293,11 @@ pub const OpenAI = struct {
         const auth_header = std.fmt.allocPrint(self.arena.allocator(), "Bearer {s}", .{self.api_key}) catch {
             return OpenAIClientError.MemoryError;
         };
-        self.headers = .{ .authorization = .{ .override = auth_header }, .content_type = .{ .override = "application/json" } };
+        self.headers = .{
+            .authorization = .{ .override = auth_header },
+            .user_agent = .{ .override = user_agent.? },
+            .content_type = .{ .override = "application/json" },
+        };
         if (self.project != null or self.organization != null) {
             var arr = std.ArrayList(std.http.Header).initCapacity(self.arena.allocator(), 2) catch {
                 return OpenAIClientError.MemoryError;
@@ -381,14 +408,7 @@ pub const OpenAI = struct {
                     const reader = response.reader(&transfer_buffer);
                     const body = try reader.allocRemaining(allocator, .limited(1024 * 1024));
                     defer allocator.free(body);
-                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
-                        log.err("{s}", .{body});
-                        // if we can't parse the error, it was a bad request.
-                        return OpenAIError.BadRequest;
-                    };
-                    defer err.deinit();
-                    log.err("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
-                    return getErrorFromStatus(response.head.status);
+                    return handleErrorResponse(allocator, response.head.status, body);
                 }
             } else {
                 return try Stream(ResponseType).init(allocator, http_client, req, &response);
@@ -448,14 +468,7 @@ pub const OpenAI = struct {
                     try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
                     backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
                 } else {
-                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
-                        log.err("{s}", .{body});
-                        // if we can't parse the error, it was a bad request.
-                        return OpenAIError.BadRequest;
-                    };
-                    defer err.deinit();
-                    log.info("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
-                    return getErrorFromStatus(result.status);
+                    return handleErrorResponse(allocator, result.status, body);
                 }
             } else {
                 if (ResponseType) |T| {
@@ -517,13 +530,7 @@ pub const OpenAI = struct {
                     backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
                 } else {
                     defer allocator.free(body);
-                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
-                        log.err("{s}", .{body});
-                        return OpenAIError.BadRequest;
-                    };
-                    defer err.deinit();
-                    log.info("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
-                    return getErrorFromStatus(response.head.status);
+                    return handleErrorResponse(allocator, response.head.status, body);
                 }
             } else {
                 return body;
@@ -568,13 +575,7 @@ pub const OpenAI = struct {
                     try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
                     backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
                 } else {
-                    const err = json.deserializeStructWithArena(ApiErrorResponse, allocator, body) catch {
-                        log.err("{s}", .{body});
-                        return OpenAIError.BadRequest;
-                    };
-                    defer err.deinit();
-                    log.info("{s} ({s}): {s}", .{ err.@"error".type, err.@"error".code orelse "None", err.@"error".message });
-                    return getErrorFromStatus(result.status);
+                    return handleErrorResponse(allocator, result.status, body);
                 }
             } else {
                 if (ResponseType) |T| {
@@ -594,4 +595,24 @@ test "OpenAI Client - usage" {
         .api_key = "my-test-api-key",
     });
     defer client.deinit();
+
+    try std.testing.expectEqualStrings(DEFAULT_USER_AGENT, client.headers.user_agent.override);
+}
+
+test "OpenAI Client supports custom User-Agent" {
+    const allocator = std.testing.allocator;
+    const client = try OpenAI.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{
+        .api_key = "my-test-api-key",
+        .user_agent = "dsabuddy/1.2.3",
+    });
+    defer client.deinit();
+
+    try std.testing.expectEqualStrings("dsabuddy/1.2.3", client.headers.user_agent.override);
+}
+
+test "non-json error responses preserve HTTP status mapping" {
+    try std.testing.expectEqual(
+        OpenAIError.NotSupported,
+        classifyErrorResponse(std.testing.allocator, .forbidden, "error code: 1010"),
+    );
 }
