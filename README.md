@@ -222,6 +222,47 @@ var follow_up = try client.chat.completions.create(.{
 defer follow_up.deinit();
 ```
 
+For idiomatic Zig tool functions, use the compile-time `Tools` helper. It generates function tool schemas from Zig argument structs and dispatches returned tool calls back to the registered functions.
+
+```zig
+const WeatherArgs = struct {
+    location: []const u8,
+    unit: enum { c, f } = .c,
+};
+const WeatherResult = struct {
+    temperature: []const u8,
+};
+
+fn getWeather(args: WeatherArgs) !WeatherResult {
+    _ = args;
+    return .{ .temperature = "18C" };
+}
+
+const ToolSet = openai.Tools(.{
+    .{
+        .name = "get_weather",
+        .description = "Get weather for a location",
+        .function = getWeather,
+    },
+});
+
+var tool_set = try ToolSet.init(allocator);
+defer tool_set.deinit();
+
+var response = try client.chat.completions.create(.{
+    .model = "gpt-4o-mini",
+    .messages = &messages,
+    .tools = tool_set.definitions,
+});
+defer response.deinit();
+
+if (response.choices[0].message.tool_calls) |tool_calls| {
+    const tool_messages = try tool_set.runAll(allocator, tool_calls);
+    defer tool_messages.deinit();
+    // Send `tool_messages.messages` in the next chat completion request.
+}
+```
+
 ### Embeddings
 
 ```zig
