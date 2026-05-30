@@ -1,6 +1,7 @@
 const std = @import("std");
 const completions = @import("completions.zig");
 const json = @import("json.zig");
+const schema = @import("schema.zig");
 
 pub const ToolError = error{
     InvalidToolCall,
@@ -34,14 +35,14 @@ pub fn Tools(comptime specs: anytype) type {
             inline for (specs, 0..) |spec, index| {
                 const Args = argsType(spec.function);
                 const strict = comptime specStrict(spec);
-                const schema_text = try schemaText(allocator, Args, strict);
+                const schema_text = try schema.text(allocator, Args, strict);
                 defer allocator.free(schema_text);
-                const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), schema_text, .{});
+                const schema_value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), schema_text, .{});
                 definitions[index] = .{
                     .function = .{
                         .name = spec.name,
                         .description = specDescription(spec),
-                        .parameters = schema,
+                        .parameters = schema_value,
                         .strict = if (strict) true else null,
                     },
                 };
@@ -166,97 +167,6 @@ fn freeMessageContents(allocator: std.mem.Allocator, messages: []completions.Cha
         };
         if (message.tool_call_id) |id| allocator.free(id);
     }
-}
-
-fn schemaText(allocator: std.mem.Allocator, comptime T: type, comptime strict: bool) ![]u8 {
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    errdefer writer.deinit();
-    try writeSchema(&writer.writer, T, strict);
-    return writer.toOwnedSlice();
-}
-
-fn writeSchema(writer: *std.Io.Writer, comptime T: type, comptime strict: bool) !void {
-    switch (@typeInfo(T)) {
-        .bool => try writeType(writer, "boolean"),
-        .int, .comptime_int => try writeType(writer, "integer"),
-        .float, .comptime_float => try writeType(writer, "number"),
-        .optional => |optional| {
-            try writer.writeAll("{\"anyOf\":[");
-            try writeSchema(writer, optional.child, strict);
-            try writer.writeByte(',');
-            try writeType(writer, "null");
-            try writer.writeAll("]}");
-        },
-        .@"enum" => |enum_info| {
-            try writer.writeAll("{\"type\":\"string\",\"enum\":[");
-            inline for (enum_info.fields, 0..) |field, index| {
-                if (index != 0) try writer.writeByte(',');
-                try writeJsonString(writer, field.name);
-            }
-            try writer.writeAll("]}");
-        },
-        .pointer => |pointer| switch (pointer.size) {
-            .slice => {
-                if (pointer.child == u8) {
-                    try writeType(writer, "string");
-                } else {
-                    try writer.writeAll("{\"type\":\"array\",\"items\":");
-                    try writeSchema(writer, pointer.child, strict);
-                    try writer.writeByte('}');
-                }
-            },
-            else => @compileError("tool schemas only support slices, not pointers"),
-        },
-        .array => |array| {
-            if (array.child == u8) {
-                try writeType(writer, "string");
-            } else {
-                try writer.writeAll("{\"type\":\"array\",\"items\":");
-                try writeSchema(writer, array.child, strict);
-                try writer.writeByte('}');
-            }
-        },
-        .@"struct" => |struct_info| {
-            if (struct_info.is_tuple) {
-                @compileError("tool schemas do not support tuple structs");
-            }
-            try writer.writeAll("{\"type\":\"object\",\"properties\":{");
-            inline for (struct_info.fields, 0..) |field, index| {
-                if (index != 0) try writer.writeByte(',');
-                try writeJsonString(writer, field.name);
-                try writer.writeByte(':');
-                try writeSchema(writer, field.type, strict);
-            }
-            try writer.writeByte('}');
-
-            const required_count = comptime requiredFieldCount(struct_info.fields, strict);
-            if (required_count > 0) {
-                try writer.writeAll(",\"required\":[");
-                var required_index: usize = 0;
-                inline for (struct_info.fields) |field| {
-                    if (comptime isRequired(field, strict)) {
-                        if (required_index != 0) try writer.writeByte(',');
-                        try writeJsonString(writer, field.name);
-                        required_index += 1;
-                    }
-                }
-                try writer.writeByte(']');
-            }
-
-            try writer.writeAll(",\"additionalProperties\":false}");
-        },
-        else => @compileError("unsupported tool schema type: " ++ @typeName(T)),
-    }
-}
-
-fn writeType(writer: *std.Io.Writer, value: []const u8) !void {
-    try writer.writeAll("{\"type\":");
-    try writeJsonString(writer, value);
-    try writer.writeByte('}');
-}
-
-fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
 }
 
 fn validateSpecs(comptime specs: anytype) void {

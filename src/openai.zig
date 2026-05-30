@@ -25,6 +25,8 @@ pub const models = @import("models.zig");
 pub const completions = @import("completions.zig");
 pub const embeddings = @import("embeddings.zig");
 pub const files = @import("files.zig");
+pub const schema = @import("schema.zig");
+pub const structured = @import("structured.zig");
 pub const tools = @import("tools.zig");
 /// Contains helper functions for creating your own deserializable types.
 pub const json = @import("json.zig");
@@ -58,6 +60,7 @@ pub const PredictionContentPart = completions.PredictionContentPart;
 pub const PredictionContentValue = completions.PredictionContentValue;
 pub const ResponseFormat = completions.ResponseFormat;
 pub const ResponseFormatJsonSchema = completions.ResponseFormatJsonSchema;
+pub const StructuredOutput = structured.StructuredOutput;
 pub const ToolCall = completions.ToolCall;
 pub const ToolCallCustom = completions.ToolCallCustom;
 pub const ToolCallDelta = completions.ToolCallDelta;

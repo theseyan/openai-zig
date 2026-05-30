@@ -165,6 +165,38 @@ const parts = [_]ChatContentPart{
 };
 ```
 
+#### Structured Outputs
+
+```zig
+const CalendarEvent = struct {
+    name: []const u8,
+    participants: []const []const u8,
+    location: ?[]const u8 = null,
+};
+
+var output = try openai.StructuredOutput(CalendarEvent).init(allocator, .{
+    .name = "calendar_event",
+    .description = "Extract a calendar event.",
+});
+defer output.deinit();
+
+var response = try client.chat.completions.create(.{
+    .model = "gpt-4o-mini",
+    .messages = &[_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "Ada and Grace are reviewing the board plan." },
+        },
+    },
+    .response_format = output.responseFormat(),
+});
+defer response.deinit();
+
+var event = try output.parse(allocator, response.choices[0].message.content.?);
+defer event.deinit();
+std.log.debug("event: {s}", .{event.value.name});
+```
+
 #### Tool Calling
 
 ```zig
