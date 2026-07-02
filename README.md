@@ -77,7 +77,7 @@ defer io.deinit();
 
 var client = try OpenAI.init(allocator, io.io(), .{
     .api_key = "sk-...",
-    // Optional; defaults to "openai-zig/0.1.0".
+    // Optional; defaults to "openai-zig/0.2.3".
     .user_agent = "my-app/1.0",
 });
 defer client.deinit();
