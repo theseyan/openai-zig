@@ -33,6 +33,7 @@ pub const json = @import("json.zig");
 
 pub const OpenAI = client.OpenAI;
 pub const OpenAIConfig = client.OpenAIConfig;
+pub const AbortController = client.AbortController;
 pub const ChatMessage = completions.ChatMessage;
 pub const ChatMessageAudio = completions.ChatMessageAudio;
 pub const ChatMessageContent = completions.ChatMessageContent;

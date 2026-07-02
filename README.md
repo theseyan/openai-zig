@@ -129,6 +129,37 @@ while (try stream.next()) |val| {
 std.debug.print("\n", .{});
 ```
 
+Streams can also be canceled from another task/thread with an abort controller.
+The controller must outlive the stream and must not be copied while the stream
+is using it. Cancellation uses the same `std.Io` instance passed to
+`OpenAI.init`.
+
+```zig
+var abort_controller = openai.AbortController.init();
+var stream = try client.chat.completions.createStreamAbortable(.{
+    .model = "gpt-4o-mini",
+    .messages = &[_]ChatMessage{
+        .{
+            .role = "user",
+            .content = .{ .text = "Write a long story." },
+        },
+    },
+}, &abort_controller);
+defer stream.deinit();
+
+// From another task/thread:
+abort_controller.abort();
+
+while (stream.next() catch |err| switch (err) {
+    error.Canceled => null,
+    else => |e| return e,
+}) |val| {
+    if (val.choices[0].delta.content) |content| {
+        std.debug.print("{s}", .{content});
+    }
+}
+```
+
 #### Image Understanding
 
 ```zig

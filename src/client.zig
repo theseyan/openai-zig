@@ -25,6 +25,70 @@ const INITIAL_RETRY_DELAY = 0.5;
 const MAX_RETRY_DELAY = 8;
 pub const DEFAULT_USER_AGENT = "openai-zig/0.1.0";
 
+pub const AbortController = struct {
+    state: AbortState = .{},
+
+    pub fn init() AbortController {
+        return .{};
+    }
+
+    /// Cancels the associated stream, if one is currently attached.
+    ///
+    /// This method is thread-safe and may be called while another thread/task is
+    /// blocked in `Stream.next`. Cancellation uses the `std.Io` supplied to
+    /// `OpenAI.init` for the active request.
+    ///
+    /// The controller is one-shot: after `abort` is called, it remains aborted
+    /// and should not be reused for a new request.
+    pub fn abort(self: *AbortController) void {
+        self.state.abort();
+    }
+
+    pub fn isAborted(self: *const AbortController) bool {
+        return self.state.aborted();
+    }
+};
+
+const AbortState = struct {
+    canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    active: std.atomic.Value(?*std.http.Client.Connection) = std.atomic.Value(?*std.http.Client.Connection).init(null),
+
+    fn aborted(self: *const AbortState) bool {
+        return self.canceled.load(.acquire);
+    }
+
+    fn abort(self: *AbortState) void {
+        self.canceled.store(true, .release);
+        self.wake();
+    }
+
+    fn attach(self: *AbortState, connection: *std.http.Client.Connection) void {
+        const old = self.active.swap(connection, .acq_rel);
+        std.debug.assert(old == null);
+        if (self.aborted()) {
+            self.wake();
+        }
+    }
+
+    fn detach(self: *AbortState, connection: *std.http.Client.Connection) void {
+        _ = self.active.cmpxchgStrong(connection, null, .acq_rel, .acquire);
+    }
+
+    fn wake(self: *AbortState) void {
+        const connection = self.active.swap(null, .acq_rel) orelse return;
+        connection.stream_reader.stream.shutdown(connection.client.io, .both) catch {};
+    }
+};
+
+fn checkCanceled(request: *std.http.Client.Request, controller: ?*AbortController) error{Canceled}!void {
+    const c = controller orelse return;
+    if (!c.isAborted()) return;
+    if (request.connection) |connection| {
+        connection.closing = true;
+    }
+    return error.Canceled;
+}
+
 const ApiError = struct {
     message: []const u8,
     type: []const u8,
@@ -51,8 +115,10 @@ pub fn Stream(comptime T: type) type {
         request: *std.http.Client.Request,
         client: *std.http.Client,
         transfer_buffer: []u8,
+        controller: *AbortController,
+        owns_controller: bool,
 
-        pub fn init(allocator: std.mem.Allocator, http_client: *std.http.Client, request: *std.http.Client.Request, response: *std.http.Client.Response) !@This() {
+        pub fn init(allocator: std.mem.Allocator, http_client: *std.http.Client, request: *std.http.Client.Request, response: *std.http.Client.Response, controller: ?*AbortController, attached: bool) !@This() {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer allocator.destroy(arena);
@@ -60,28 +126,73 @@ pub fn Stream(comptime T: type) type {
             const transfer_buffer = try allocator.alloc(u8, 64 * 1024);
             errdefer allocator.free(transfer_buffer);
 
+            const owns_controller = controller == null;
+            const stream_controller = controller orelse controller: {
+                const owned = try allocator.create(AbortController);
+                owned.* = .{};
+                break :controller owned;
+            };
+            errdefer if (owns_controller) allocator.destroy(stream_controller);
+
+            if (!attached) {
+                stream_controller.state.attach(request.connection.?);
+            }
+
             return .{
                 .arena = arena,
                 .request = request,
                 .client = http_client,
                 .reader = response.reader(transfer_buffer),
                 .transfer_buffer = transfer_buffer,
+                .controller = stream_controller,
+                .owns_controller = owns_controller,
             };
         }
 
         pub fn deinit(self: *@This()) void {
             const allocator = self.arena.child_allocator;
+            if (self.request.connection) |connection| {
+                self.controller.state.detach(connection);
+            }
             allocator.free(self.transfer_buffer);
             self.arena.deinit();
             self.request.deinit();
             self.client.deinit();
             allocator.destroy(self.request);
             allocator.destroy(self.client);
+            if (self.owns_controller) {
+                allocator.destroy(self.controller);
+            }
             allocator.destroy(self.arena);
         }
 
+        /// Cancels this stream. `next` returns `error.Canceled` once socket
+        /// shutdown wakes the pending read.
+        pub fn abort(self: *@This()) void {
+            self.controller.abort();
+        }
+
+        pub fn isAborted(self: *const @This()) bool {
+            return self.controller.isAborted();
+        }
+
+        fn checkCanceled(self: *@This()) error{Canceled}!void {
+            if (!self.isAborted()) return;
+            if (self.request.connection) |connection| {
+                connection.closing = true;
+            }
+            return error.Canceled;
+        }
+
         pub fn next(self: *@This()) !?T {
-            while (try self.reader.takeDelimiter('\n')) |line| {
+            try self.checkCanceled();
+            while (self.reader.takeDelimiter('\n') catch |err| switch (err) {
+                error.ReadFailed => {
+                    try self.checkCanceled();
+                    return err;
+                },
+                else => |e| return e,
+            }) |line| {
                 if (std.mem.trim(u8, line, " \t\r\n").len != 0) {
                     var it = std.mem.splitSequence(u8, line, "data:");
                     _ = it.next();
@@ -94,6 +205,7 @@ pub fn Stream(comptime T: type) type {
                     });
                 }
             }
+            try self.checkCanceled();
             return null;
         }
     };
@@ -229,6 +341,8 @@ pub const OpenAI = struct {
 
     /// Creates a new `OpenAI` object, initializing subcomponents and reading in environment variables for
     /// `base_url`, `api_key`, `organization`, and `project`.
+    ///
+    /// All request I/O, including stream abort wakeups, uses the supplied `io`.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: OpenAIConfig) OpenAIClientError!*OpenAI {
         const arena = allocator.create(std.heap.ArenaAllocator) catch {
             return OpenAIClientError.MemoryError;
@@ -358,6 +472,19 @@ pub const OpenAI = struct {
     /// The user is responsible for managing that memory.
     /// Call `deinit` on the response.
     pub fn requestStream(self: *const OpenAI, options: OpenAIRequest, comptime ResponseType: type) !Stream(ResponseType) {
+        return self.requestStreamInner(options, ResponseType, null);
+    }
+
+    /// Like `requestStream`, but attaches a caller-owned abort controller that
+    /// can cancel a blocked `Stream.next` call from another task/thread.
+    ///
+    /// The controller must outlive the returned stream and must not be copied
+    /// while the stream is using it.
+    pub fn requestStreamAbortable(self: *const OpenAI, options: OpenAIRequest, comptime ResponseType: type, controller: *AbortController) !Stream(ResponseType) {
+        return self.requestStreamInner(options, ResponseType, controller);
+    }
+
+    fn requestStreamInner(self: *const OpenAI, options: OpenAIRequest, comptime ResponseType: type, controller: ?*AbortController) !Stream(ResponseType) {
         const method = options.method;
         const path = options.path;
         const allocator = self.allocator;
@@ -375,6 +502,14 @@ pub const OpenAI = struct {
         var req = try allocator.create(std.http.Client.Request);
         errdefer allocator.destroy(req);
         errdefer req.deinit();
+        var attached = false;
+        errdefer if (attached) {
+            if (controller) |c| {
+                if (req.connection) |connection| {
+                    c.state.detach(connection);
+                }
+            }
+        };
 
         for (0..self.max_retries + 1) |attempt| {
             req.* = try std.http.Client.request(http_client, method, uri, .{
@@ -382,18 +517,40 @@ pub const OpenAI = struct {
                 .extra_headers = self.extra_headers,
                 .redirect_behavior = .unhandled,
             });
+            if (controller) |c| {
+                c.state.attach(req.connection.?);
+                attached = true;
+            }
 
             if (options.json) |body| {
                 req.transfer_encoding = .{ .content_length = body.len };
-                var body_writer = try req.sendBodyUnflushed(&.{});
+                var body_writer = req.sendBodyUnflushed(&.{}) catch |err| {
+                    try checkCanceled(req, controller);
+                    return err;
+                };
                 log.debug("{s}", .{body});
-                try body_writer.writer.writeAll(body);
-                try body_writer.end();
-                try req.connection.?.flush();
+                body_writer.writer.writeAll(body) catch |err| {
+                    try checkCanceled(req, controller);
+                    return err;
+                };
+                body_writer.end() catch |err| {
+                    try checkCanceled(req, controller);
+                    return err;
+                };
+                req.connection.?.flush() catch |err| {
+                    try checkCanceled(req, controller);
+                    return err;
+                };
             } else {
-                try req.sendBodiless();
+                req.sendBodiless() catch |err| {
+                    try checkCanceled(req, controller);
+                    return err;
+                };
             }
-            var response = try req.receiveHead(&.{});
+            var response = req.receiveHead(&.{}) catch |err| {
+                try checkCanceled(req, controller);
+                return err;
+            };
             const status_int = @intFromEnum(response.head.status);
             log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, response.head.status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
@@ -402,6 +559,14 @@ pub const OpenAI = struct {
                     log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
                     try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
                     backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                    if (attached) {
+                        if (controller) |c| {
+                            if (req.connection) |connection| {
+                                c.state.detach(connection);
+                            }
+                        }
+                        attached = false;
+                    }
                     req.deinit();
                 } else {
                     var transfer_buffer: [64 * 1024]u8 = undefined;
@@ -411,7 +576,9 @@ pub const OpenAI = struct {
                     return handleErrorResponse(allocator, response.head.status, body);
                 }
             } else {
-                return try Stream(ResponseType).init(allocator, http_client, req, &response);
+                const stream = try Stream(ResponseType).init(allocator, http_client, req, &response, controller, attached);
+                attached = false;
+                return stream;
             }
         }
         // max_retries must be >= 0 (since it's usize) and loop condition is 0..max_retries+1

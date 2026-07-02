@@ -594,6 +594,20 @@ pub const Completions = struct {
     /// Creates a chat completion request and returns a `Stream(ChatCompletionChunk)`
     /// The caller is also responsible for calling deinit() on the stream to free all allocated memory.
     pub fn createStream(self: *const Completions, request: ChatCompletionsRequest) !client.Stream(ChatCompletionChunk) {
+        return self.createStreamInner(request, null);
+    }
+
+    /// Creates a chat completion stream that can be canceled via `controller`.
+    ///
+    /// The controller is caller-owned and may be used from another task/thread
+    /// while `Stream.next` is blocked. Controllers are one-shot; do not reuse one
+    /// after calling `abort`. It must outlive the returned stream and must not
+    /// be copied while the stream is using it.
+    pub fn createStreamAbortable(self: *const Completions, request: ChatCompletionsRequest, controller: *client.AbortController) !client.Stream(ChatCompletionChunk) {
+        return self.createStreamInner(request, controller);
+    }
+
+    fn createStreamInner(self: *const Completions, request: ChatCompletionsRequest, controller: ?*client.AbortController) !client.Stream(ChatCompletionChunk) {
         const allocator = self.openai.allocator;
 
         var payload = request;
@@ -603,11 +617,15 @@ pub const Completions = struct {
             .emit_null_optional_fields = false,
         });
         defer allocator.free(body);
-        return self.openai.requestStream(.{
+        const stream_options: client.OpenAI.OpenAIRequest = .{
             .method = .POST,
             .path = "/chat/completions",
             .json = body,
-        }, ChatCompletionChunk);
+        };
+        if (controller) |c| {
+            return self.openai.requestStreamAbortable(stream_options, ChatCompletionChunk, c);
+        }
+        return self.openai.requestStream(stream_options, ChatCompletionChunk);
     }
 };
 
