@@ -184,6 +184,16 @@ pub fn Stream(comptime T: type) type {
             return error.Canceled;
         }
 
+        fn parseEvent(self: *@This(), data: []const u8) !?T {
+            if (comptime @hasDecl(T, "parseSseData")) {
+                return try T.parseSseData(self.arena.allocator(), data);
+            }
+            return try std.json.parseFromSliceLeaky(T, self.arena.allocator(), data, .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            });
+        }
+
         pub fn next(self: *@This()) !?T {
             try self.checkCanceled();
             while (self.reader.takeDelimiter('\n') catch |err| switch (err) {
@@ -199,10 +209,7 @@ pub fn Stream(comptime T: type) type {
                     const stripped = std.mem.trim(u8, it.rest(), " \t\r\n");
                     if (stripped.len == 0) continue;
                     if (std.mem.eql(u8, "[DONE]", stripped)) return null;
-                    return try std.json.parseFromSliceLeaky(T, self.arena.allocator(), stripped, .{
-                        .ignore_unknown_fields = true,
-                        .allocate = .alloc_always,
-                    });
+                    if (try self.parseEvent(stripped)) |event| return event;
                 }
             }
             try self.checkCanceled();

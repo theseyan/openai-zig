@@ -525,6 +525,35 @@ pub const ChatCompletionChunk = struct {
         logprobs: ?[]const u8 = null,
         finish_reason: ?[]const u8 = null,
     },
+
+    pub fn parseSseData(allocator: std.mem.Allocator, data: []const u8) !?ChatCompletionChunk {
+        return std.json.parseFromSliceLeaky(ChatCompletionChunk, allocator, data, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.MissingField => {
+                if (try isMetadataChunk(allocator, data)) return null;
+                return err;
+            },
+            else => |e| return e,
+        };
+    }
+
+    fn isMetadataChunk(allocator: std.mem.Allocator, data: []const u8) !bool {
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, data, .{
+            .allocate = .alloc_always,
+        });
+        const object = switch (value) {
+            .object => |object| object,
+            else => return false,
+        };
+        if (object.get("error") != null) return false;
+        const choices = object.get("choices") orelse return true;
+        return switch (choices) {
+            .array => |array| array.items.len == 0,
+            else => false,
+        };
+    }
 };
 
 /// A chat completions payload.
@@ -1238,6 +1267,94 @@ test "chat completion chunk parses partial tool call deltas" {
     try std.testing.expectEqualStrings("call_123", delta.id.?);
     try std.testing.expectEqualStrings("get_weather", delta.function.?.name.?);
     try std.testing.expectEqualStrings("{\"location\"", delta.function.?.arguments.?);
+}
+
+test "chat completion stream skips usage-only metadata chunks" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const metadata =
+        \\{
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 20,
+        \\    "total_tokens": 30
+        \\  }
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        std.json.parseFromSliceLeaky(ChatCompletionChunk, arena.allocator(), metadata, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }),
+    );
+
+    const chunk = try ChatCompletionChunk.parseSseData(
+        arena.allocator(),
+        metadata,
+    );
+
+    try std.testing.expectEqual(null, chunk);
+}
+
+test "chat completion stream skips empty choices metadata chunks" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const chunk = try ChatCompletionChunk.parseSseData(arena.allocator(),
+        \\{
+        \\  "choices": [],
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 20,
+        \\    "total_tokens": 30
+        \\  }
+        \\}
+    );
+
+    try std.testing.expectEqual(null, chunk);
+}
+
+test "chat completion stream keeps non-empty chunks strict" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        error.MissingField,
+        ChatCompletionChunk.parseSseData(arena.allocator(),
+            \\{
+            \\  "choices": [{
+            \\    "index": 0,
+            \\    "delta": {
+            \\      "role": "assistant"
+            \\    },
+            \\    "finish_reason": null
+            \\  }]
+            \\}
+        ),
+    );
+}
+
+test "chat completion stream does not skip provider error chunks" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        error.MissingField,
+        ChatCompletionChunk.parseSseData(arena.allocator(),
+            \\{
+            \\  "error": {
+            \\    "message": "provider failed"
+            \\  }
+            \\}
+        ),
+    );
 }
 
 test "chat completion chunk parses refusal deltas" {
