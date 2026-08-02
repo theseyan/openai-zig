@@ -513,6 +513,7 @@ pub const OpenAI = struct {
         self.chat.deinit();
         self.embeddings.deinit();
         self.files.deinit();
+        self.models.deinit();
         self.arena.deinit();
         self.allocator.destroy(self.arena);
         self.allocator.destroy(self);
