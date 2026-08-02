@@ -24,7 +24,7 @@ const log = std.log.scoped(.openai);
 const INITIAL_RETRY_DELAY = 0.5;
 const MAX_RETRY_DELAY = 8;
 const MAX_SERVER_RETRY_DELAY = 60;
-pub const DEFAULT_USER_AGENT = "openai-zig/0.2.4";
+pub const DEFAULT_USER_AGENT = "openai-zig/0.3.0";
 
 pub const AbortController = struct {
     state: AbortState = .{},
@@ -369,7 +369,7 @@ pub const OpenAIConfig = struct {
     project: ?[]const u8 = null,
     /// The maximum number of retries the client will attempt. Defaults to `3`.
     max_retries: usize = 3,
-    /// User-Agent header sent with every request. Defaults to `openai-zig/0.2.4`.
+    /// User-Agent header sent with every request. Defaults to `openai-zig/0.3.0`.
     user_agent: ?[]const u8 = null,
     /// Optional environment map used to load OpenAI API config when explicit fields are null.
     environ_map: ?*const std.process.Environ.Map = null,
