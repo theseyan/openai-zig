@@ -360,6 +360,24 @@ pub const MessageAnnotation = struct {
     url_citation: ?MessageUrlCitation = null,
 };
 
+pub const ChatCompletionTopLogprob = struct {
+    token: []const u8,
+    logprob: f64,
+    bytes: ?[]const u8 = null,
+};
+
+pub const ChatCompletionTokenLogprob = struct {
+    token: []const u8,
+    logprob: f64,
+    bytes: ?[]const u8 = null,
+    top_logprobs: []const ChatCompletionTopLogprob,
+};
+
+pub const ChatCompletionLogprobs = struct {
+    content: ?[]const ChatCompletionTokenLogprob = null,
+    refusal: ?[]const ChatCompletionTokenLogprob = null,
+};
+
 pub const ResponseFormatJsonSchema = struct {
     name: []const u8,
     description: ?[]const u8 = null,
@@ -522,7 +540,7 @@ pub const ChatCompletionChunk = struct {
             refusal: ?[]const u8 = null,
             tool_calls: ?[]const ToolCallDelta = null,
         },
-        logprobs: ?[]const u8 = null,
+        logprobs: ?ChatCompletionLogprobs = null,
         finish_reason: ?[]const u8 = null,
     },
 
@@ -565,7 +583,7 @@ pub const ChatCompletion = struct {
     choices: []struct {
         index: u64,
         message: Message,
-        // logprobs: ?[]const u8 = null,
+        logprobs: ?ChatCompletionLogprobs = null,
         finish_reason: ?[]const u8 = null,
     },
     usage: struct {
@@ -1234,6 +1252,19 @@ test "chat completion parses modern message response fields" {
         \\        "transcript": "Here is the citation."
         \\      }
         \\    },
+        \\    "logprobs": {
+        \\      "content": [{
+        \\        "token": "Here",
+        \\        "logprob": -0.1,
+        \\        "bytes": [72, 101, 114, 101],
+        \\        "top_logprobs": [{
+        \\          "token": "Here",
+        \\          "logprob": -0.1,
+        \\          "bytes": [72, 101, 114, 101]
+        \\        }]
+        \\      }],
+        \\      "refusal": null
+        \\    },
         \\    "finish_reason": "stop"
         \\  }],
         \\  "usage": {
@@ -1254,6 +1285,10 @@ test "chat completion parses modern message response fields" {
     try std.testing.expectEqual(@as(u64, 12), citation.start_index);
     try std.testing.expectEqualStrings("Example", citation.title);
     try std.testing.expectEqualStrings("https://example.com", citation.url);
+    const token = response.choices[0].logprobs.?.content.?[0];
+    try std.testing.expectEqualStrings("Here", token.token);
+    try std.testing.expectEqual(@as(u8, 'H'), token.bytes.?[0]);
+    try std.testing.expectEqualStrings("Here", token.top_logprobs[0].token);
 }
 
 test "chat completion chunk parses partial tool call deltas" {
@@ -1284,6 +1319,14 @@ test "chat completion chunk parses partial tool call deltas" {
         \\        }
         \\      }]
         \\    },
+        \\    "logprobs": {
+        \\      "content": [{
+        \\        "token": "Paris",
+        \\        "logprob": -0.25,
+        \\        "bytes": null,
+        \\        "top_logprobs": []
+        \\      }]
+        \\    },
         \\    "finish_reason": null
         \\  }]
         \\}
@@ -1296,6 +1339,8 @@ test "chat completion chunk parses partial tool call deltas" {
     try std.testing.expectEqualStrings("call_123", delta.id.?);
     try std.testing.expectEqualStrings("get_weather", delta.function.?.name.?);
     try std.testing.expectEqualStrings("{\"location\"", delta.function.?.arguments.?);
+    try std.testing.expectEqualStrings("Paris", chunk.choices[0].logprobs.?.content.?[0].token);
+    try std.testing.expect(chunk.choices[0].logprobs.?.content.?[0].bytes == null);
 }
 
 test "chat completion stream skips usage-only metadata chunks" {
