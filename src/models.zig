@@ -1,6 +1,7 @@
 const std = @import("std");
 const client = @import("client.zig");
 const json = @import("json.zig");
+const utils = @import("utils.zig");
 const OpenAI = client.OpenAI;
 
 pub const ListModelResponse = struct {
@@ -79,22 +80,8 @@ fn buildModelPath(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
     try writer.writer.writeAll("/models/");
-    try writePercentEncoded(&writer.writer, id);
+    try utils.writePercentEncoded(&writer.writer, id);
     return writer.toOwnedSlice();
-}
-
-fn writePercentEncoded(writer: *std.Io.Writer, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |byte| {
-        switch (byte) {
-            'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => try writer.writeByte(byte),
-            else => {
-                try writer.writeByte('%');
-                try writer.writeByte(hex[byte >> 4]);
-                try writer.writeByte(hex[byte & 0x0f]);
-            },
-        }
-    }
 }
 
 test "build model path escapes ids" {

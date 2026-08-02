@@ -2,6 +2,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const json = @import("json.zig");
 const multipart = @import("multipart.zig");
+const utils = @import("utils.zig");
 
 pub const FilePurpose = enum {
     assistants,
@@ -188,7 +189,7 @@ fn buildFilePath(allocator: std.mem.Allocator, file_id: []const u8, suffix: []co
     var writer = std.Io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
     try writer.writer.writeAll("/files/");
-    try writePercentEncoded(&writer.writer, file_id);
+    try utils.writePercentEncoded(&writer.writer, file_id);
     try writer.writer.writeAll(suffix);
     return writer.toOwnedSlice();
 }
@@ -196,23 +197,9 @@ fn buildFilePath(allocator: std.mem.Allocator, file_id: []const u8, suffix: []co
 fn appendQueryParam(writer: *std.Io.Writer, has_query: *bool, name: []const u8, value: []const u8) !void {
     try writer.writeByte(if (has_query.*) '&' else '?');
     has_query.* = true;
-    try writePercentEncoded(writer, name);
+    try utils.writePercentEncoded(writer, name);
     try writer.writeByte('=');
-    try writePercentEncoded(writer, value);
-}
-
-fn writePercentEncoded(writer: *std.Io.Writer, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |byte| {
-        switch (byte) {
-            'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => try writer.writeByte(byte),
-            else => {
-                try writer.writeByte('%');
-                try writer.writeByte(hex[byte >> 4]);
-                try writer.writeByte(hex[byte & 0x0f]);
-            },
-        }
-    }
+    try utils.writePercentEncoded(writer, value);
 }
 
 fn buildCreateBody(allocator: std.mem.Allocator, boundary: []const u8, request: FileCreateRequest) ![]u8 {
