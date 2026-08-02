@@ -492,6 +492,12 @@ pub const OpenAI = struct {
         content_type: []const u8,
     };
 
+    pub const StreamingMultipartRequest = struct {
+        path: []const u8,
+        content_type: []const u8,
+        content_length: u64,
+    };
+
     /// Creates a request to OpenAI expecting SSE events. Returns a `Stream` struct wrapping the response type.
     /// Makes a request to the OpenAI base_url provided to the client, with the corresponding method, path, and options provided.
     /// If there isn't a typed method for an endpoint, this can be used and will automatically pass in required headers.
@@ -739,8 +745,27 @@ pub const OpenAI = struct {
         unreachable;
     }
 
-    /// Makes a multipart/form-data request to OpenAI. The caller owns `body` and `content_type`.
-    pub fn requestMultipart(self: *const OpenAI, options: MultipartRequest, comptime ResponseType: ?type) !if (ResponseType) |T| T else void {
+    /// Makes a multipart/form-data request to OpenAI.
+    pub fn requestMultipart(
+        self: *const OpenAI,
+        options: MultipartRequest,
+        comptime ResponseType: ?type,
+    ) !if (ResponseType) |T| T else void {
+        return self.requestMultipartStream(.{
+            .path = options.path,
+            .content_type = options.content_type,
+            .content_length = options.body.len,
+        }, options.body, writeMultipartSlice, ResponseType);
+    }
+
+    /// Makes a streaming multipart/form-data request to OpenAI.
+    pub fn requestMultipartStream(
+        self: *const OpenAI,
+        options: StreamingMultipartRequest,
+        context: anytype,
+        comptime writeBody: anytype,
+        comptime ResponseType: ?type,
+    ) !if (ResponseType) |T| T else void {
         const allocator = self.allocator;
         const url_string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ self.base_url, options.path });
         defer allocator.free(url_string);
@@ -753,29 +778,32 @@ pub const OpenAI = struct {
         var backoff: f32 = INITIAL_RETRY_DELAY;
 
         for (0..self.max_retries + 1) |attempt| {
-            var response_writer = std.Io.Writer.Allocating.init(allocator);
-            defer response_writer.deinit();
-            const result = try http_client.fetch(.{
-                .location = .{ .uri = uri },
-                .method = .POST,
-                .payload = options.body,
+            var req = try std.http.Client.request(&http_client, .POST, uri, .{
                 .headers = headers,
                 .extra_headers = self.extra_headers,
                 .redirect_behavior = .unhandled,
-                .response_writer = &response_writer.writer,
             });
-            const body = try response_writer.toOwnedSlice();
+            defer req.deinit();
+
+            req.transfer_encoding = .{ .content_length = options.content_length };
+            var body_writer = try req.sendBodyUnflushed(&.{});
+            try writeBody(context, &body_writer.writer);
+            try body_writer.end();
+            try req.connection.?.flush();
+
+            var response = try req.receiveHead(&.{});
+            const body = try allocResponseBody(allocator, &response, std.math.maxInt(usize));
             defer allocator.free(body);
 
-            const status_int = @intFromEnum(result.status);
-            log.info("POST - {s} - {d} {s}", .{ url_string, status_int, result.status.phrase() orelse "Unknown" });
+            const status_int = @intFromEnum(response.head.status);
+            log.info("POST - {s} - {d} {s}", .{ url_string, status_int, response.head.status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
                 if (attempt != self.max_retries and status_int >= 429) {
                     log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
                     try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
                     backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
                 } else {
-                    return handleErrorResponse(allocator, result.status, body);
+                    return handleErrorResponse(allocator, response.head.status, body);
                 }
             } else {
                 if (ResponseType) |T| {
@@ -788,6 +816,10 @@ pub const OpenAI = struct {
         unreachable;
     }
 };
+
+fn writeMultipartSlice(body: []const u8, writer: *std.Io.Writer) !void {
+    try writer.writeAll(body);
+}
 
 test "OpenAI Client - usage" {
     const allocator = std.testing.allocator;

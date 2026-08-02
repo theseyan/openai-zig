@@ -110,14 +110,21 @@ pub const Files = struct {
         const content_type = try multipart.contentType(allocator, boundary);
         defer allocator.free(content_type);
 
-        const body = try buildCreateBody(allocator, boundary, request);
-        defer allocator.free(body);
+        var field_buffer: [3]multipart.Field = undefined;
+        var seconds_buffer: [32]u8 = undefined;
+        const fields = try createFields(&field_buffer, &seconds_buffer, request);
+        const files = createFileParts(request);
+        const body = MultipartBody{
+            .boundary = boundary,
+            .fields = fields,
+            .files = &files,
+        };
 
-        return self.openai.requestMultipart(.{
+        return self.openai.requestMultipartStream(.{
             .path = "/files",
-            .body = body,
             .content_type = content_type,
-        }, FileObject);
+            .content_length = try multipart.contentLength(boundary, fields, &files),
+        }, body, writeMultipartBody, FileObject);
     }
 
     pub fn retrieve(self: *const Files, file_id: []const u8) !FileObject {
@@ -149,6 +156,16 @@ pub const Files = struct {
         }, max_bytes);
     }
 };
+
+const MultipartBody = struct {
+    boundary: []const u8,
+    fields: []const multipart.Field,
+    files: []const multipart.File,
+};
+
+fn writeMultipartBody(body: MultipartBody, writer: *std.Io.Writer) !void {
+    try multipart.write(writer, body.boundary, body.fields, body.files);
+}
 
 fn buildListPath(allocator: std.mem.Allocator, request: FileListRequest) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
@@ -199,27 +216,37 @@ fn writePercentEncoded(writer: *std.Io.Writer, value: []const u8) !void {
 }
 
 fn buildCreateBody(allocator: std.mem.Allocator, boundary: []const u8, request: FileCreateRequest) ![]u8 {
-    var fields = std.ArrayList(multipart.Field).empty;
-    defer fields.deinit(allocator);
+    var field_buffer: [3]multipart.Field = undefined;
+    var seconds_buffer: [32]u8 = undefined;
+    const fields = try createFields(&field_buffer, &seconds_buffer, request);
+    const files = createFileParts(request);
+    return multipart.build(allocator, boundary, fields, &files);
+}
 
-    try fields.append(allocator, .{
+fn createFields(field_buffer: *[3]multipart.Field, seconds_buffer: *[32]u8, request: FileCreateRequest) ![]const multipart.Field {
+    var field_count: usize = 1;
+    field_buffer[0] = .{
         .name = "purpose",
         .value = @tagName(request.purpose),
-    });
+    };
 
-    var seconds_buffer: [32]u8 = undefined;
     if (request.expires_after) |expires_after| {
-        try fields.append(allocator, .{
+        field_buffer[1] = .{
             .name = "expires_after[anchor]",
             .value = expires_after.anchor,
-        });
-        try fields.append(allocator, .{
+        };
+        field_buffer[2] = .{
             .name = "expires_after[seconds]",
-            .value = try std.fmt.bufPrint(&seconds_buffer, "{d}", .{expires_after.seconds}),
-        });
+            .value = try std.fmt.bufPrint(seconds_buffer, "{d}", .{expires_after.seconds}),
+        };
+        field_count = 3;
     }
 
-    const file_parts = [_]multipart.File{
+    return field_buffer[0..field_count];
+}
+
+fn createFileParts(request: FileCreateRequest) [1]multipart.File {
+    return .{
         .{
             .field_name = "file",
             .filename = request.file.filename,
@@ -227,8 +254,6 @@ fn buildCreateBody(allocator: std.mem.Allocator, boundary: []const u8, request: 
             .content_type = request.file.content_type,
         },
     };
-
-    return multipart.build(allocator, boundary, fields.items, &file_parts);
 }
 
 test "build file create multipart body" {

@@ -38,26 +38,36 @@ pub fn build(allocator: std.mem.Allocator, boundary: []const u8, fields: []const
     var body = std.Io.Writer.Allocating.init(allocator);
     errdefer body.deinit();
 
+    try write(&body.writer, boundary, fields, files);
+    return body.toOwnedSlice();
+}
+
+pub fn contentLength(boundary: []const u8, fields: []const Field, files: []const File) !u64 {
+    var discarding: std.Io.Writer.Discarding = .init(&.{});
+    try write(&discarding.writer, boundary, fields, files);
+    return discarding.fullCount();
+}
+
+pub fn write(writer: *std.Io.Writer, boundary: []const u8, fields: []const Field, files: []const File) !void {
     for (fields) |field| {
-        try writePartBoundary(&body.writer, boundary);
-        try writeDisposition(&body.writer, field.name, null);
-        try body.writer.writeAll("\r\n");
-        try body.writer.writeAll(field.value);
-        try body.writer.writeAll("\r\n");
+        try writePartBoundary(writer, boundary);
+        try writeDisposition(writer, field.name, null);
+        try writer.writeAll("\r\n");
+        try writer.writeAll(field.value);
+        try writer.writeAll("\r\n");
     }
 
     for (files) |file| {
-        try writePartBoundary(&body.writer, boundary);
-        try writeDisposition(&body.writer, file.field_name, file.filename);
-        try body.writer.writeAll("Content-Type: ");
-        try writeHeaderValue(&body.writer, file.content_type);
-        try body.writer.writeAll("\r\n\r\n");
-        try body.writer.writeAll(file.content);
-        try body.writer.writeAll("\r\n");
+        try writePartBoundary(writer, boundary);
+        try writeDisposition(writer, file.field_name, file.filename);
+        try writer.writeAll("Content-Type: ");
+        try writeHeaderValue(writer, file.content_type);
+        try writer.writeAll("\r\n\r\n");
+        try writer.writeAll(file.content);
+        try writer.writeAll("\r\n");
     }
 
-    try body.writer.print("--{s}--\r\n", .{boundary});
-    return body.toOwnedSlice();
+    try writer.print("--{s}--\r\n", .{boundary});
 }
 
 fn writePartBoundary(writer: *std.Io.Writer, boundary: []const u8) !void {
@@ -116,6 +126,12 @@ test "build multipart body" {
 
     const body = try build(allocator, "test-boundary", &fields, &files);
     defer allocator.free(body);
+
+    try std.testing.expectEqual(@as(u64, body.len), try contentLength("test-boundary", &fields, &files));
+    var streamed_buffer: [1024]u8 = undefined;
+    var streamed_writer = std.Io.Writer.fixed(&streamed_buffer);
+    try write(&streamed_writer, "test-boundary", &fields, &files);
+    try std.testing.expectEqualStrings(body, streamed_writer.buffered());
 
     try std.testing.expectEqualStrings(
         "--test-boundary\r\n" ++
