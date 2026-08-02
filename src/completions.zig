@@ -566,7 +566,7 @@ pub const ChatCompletion = struct {
         index: u64,
         message: Message,
         // logprobs: ?[]const u8 = null,
-        finish_reason: []const u8,
+        finish_reason: ?[]const u8 = null,
     },
     usage: struct {
         prompt_tokens: u64,
@@ -1127,12 +1127,41 @@ test "chat completion parses tool calls" {
     );
     defer response.deinit();
 
-    try std.testing.expectEqualStrings("tool_calls", response.choices[0].finish_reason);
+    try std.testing.expectEqualStrings("tool_calls", response.choices[0].finish_reason.?);
     try std.testing.expect(response.choices[0].message.content == null);
     const tool_call = response.choices[0].message.tool_calls.?[0];
     try std.testing.expectEqualStrings("call_123", tool_call.id);
     try std.testing.expectEqualStrings("get_weather", tool_call.function.?.name);
     try std.testing.expectEqualStrings("{\"location\":\"Paris\"}", tool_call.function.?.arguments);
+}
+
+test "chat completion parses null finish reason" {
+    const allocator = std.testing.allocator;
+    const response = try json.deserializeStructWithArena(ChatCompletion, allocator,
+        \\{
+        \\  "id": "chatcmpl_123",
+        \\  "object": "chat.completion",
+        \\  "created": 1710000000,
+        \\  "model": "gpt-4o-mini",
+        \\  "choices": [{
+        \\    "index": 0,
+        \\    "message": {
+        \\      "role": "assistant",
+        \\      "content": "pong"
+        \\    },
+        \\    "finish_reason": null
+        \\  }],
+        \\  "usage": {
+        \\    "prompt_tokens": 10,
+        \\    "completion_tokens": 1,
+        \\    "total_tokens": 11
+        \\  }
+        \\}
+    );
+    defer response.deinit();
+
+    try std.testing.expect(response.choices[0].finish_reason == null);
+    try std.testing.expectEqualStrings("pong", response.choices[0].message.content.?);
 }
 
 test "chat completion parses custom tool calls" {
