@@ -115,6 +115,8 @@ pub fn Stream(comptime T: type) type {
         request: *std.http.Client.Request,
         client: *std.http.Client,
         transfer_buffer: []u8,
+        decompress: *std.http.Decompress,
+        decompress_buffer: []u8,
         controller: *AbortController,
         owns_controller: bool,
 
@@ -138,12 +140,20 @@ pub fn Stream(comptime T: type) type {
                 stream_controller.state.attach(request.connection.?);
             }
 
+            const decompress = try allocator.create(std.http.Decompress);
+            errdefer allocator.destroy(decompress);
+
+            const decompress_buffer = try allocator.alloc(u8, try decompressionBufferSize(response.head.content_encoding));
+            errdefer allocator.free(decompress_buffer);
+
             return .{
                 .arena = arena,
                 .request = request,
                 .client = http_client,
-                .reader = response.reader(transfer_buffer),
+                .reader = response.readerDecompressing(transfer_buffer, decompress, decompress_buffer),
                 .transfer_buffer = transfer_buffer,
+                .decompress = decompress,
+                .decompress_buffer = decompress_buffer,
                 .controller = stream_controller,
                 .owns_controller = owns_controller,
             };
@@ -155,6 +165,8 @@ pub fn Stream(comptime T: type) type {
                 self.controller.state.detach(connection);
             }
             allocator.free(self.transfer_buffer);
+            allocator.free(self.decompress_buffer);
+            allocator.destroy(self.decompress);
             self.arena.deinit();
             self.request.deinit();
             self.client.deinit();
@@ -257,6 +269,24 @@ pub const OpenAIError = error{
     /// Unknown error occurred
     Unknown,
 };
+
+fn decompressionBufferSize(encoding: std.http.ContentEncoding) !usize {
+    return switch (encoding) {
+        .identity => 0,
+        .deflate, .gzip => std.compress.flate.max_window_len,
+        .zstd => std.compress.zstd.default_window_len,
+        .compress => error.UnsupportedCompressionMethod,
+    };
+}
+
+fn allocResponseBody(allocator: std.mem.Allocator, response: *std.http.Client.Response, max_bytes: usize) ![]u8 {
+    var transfer_buffer: [64 * 1024]u8 = undefined;
+    const decompress_buffer = try allocator.alloc(u8, try decompressionBufferSize(response.head.content_encoding));
+    defer allocator.free(decompress_buffer);
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    return reader.allocRemaining(allocator, .limited(max_bytes));
+}
 
 fn getErrorFromStatus(status: std.http.Status) OpenAIError {
     return switch (status) {
@@ -576,9 +606,7 @@ pub const OpenAI = struct {
                     }
                     req.deinit();
                 } else {
-                    var transfer_buffer: [64 * 1024]u8 = undefined;
-                    const reader = response.reader(&transfer_buffer);
-                    const body = try reader.allocRemaining(allocator, .limited(1024 * 1024));
+                    const body = try allocResponseBody(allocator, &response, 1024 * 1024);
                     defer allocator.free(body);
                     return handleErrorResponse(allocator, response.head.status, body);
                 }
@@ -690,9 +718,7 @@ pub const OpenAI = struct {
             }
 
             var response = try req.receiveHead(&.{});
-            var transfer_buffer: [64 * 1024]u8 = undefined;
-            const reader = response.reader(&transfer_buffer);
-            const body = try reader.allocRemaining(allocator, .limited(max_bytes));
+            const body = try allocResponseBody(allocator, &response, max_bytes);
 
             const status_int = @intFromEnum(response.head.status);
             log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, response.head.status.phrase() orelse "Unknown" });
@@ -789,4 +815,12 @@ test "non-json error responses preserve HTTP status mapping" {
         OpenAIError.NotSupported,
         classifyErrorResponse(std.testing.allocator, .forbidden, "error code: 1010"),
     );
+}
+
+test "decompression buffers match supported encodings" {
+    try std.testing.expectEqual(@as(usize, 0), try decompressionBufferSize(.identity));
+    try std.testing.expectEqual(@as(usize, std.compress.flate.max_window_len), try decompressionBufferSize(.gzip));
+    try std.testing.expectEqual(@as(usize, std.compress.flate.max_window_len), try decompressionBufferSize(.deflate));
+    try std.testing.expectEqual(@as(usize, std.compress.zstd.default_window_len), try decompressionBufferSize(.zstd));
+    try std.testing.expectError(error.UnsupportedCompressionMethod, decompressionBufferSize(.compress));
 }
