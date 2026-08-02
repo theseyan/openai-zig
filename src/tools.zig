@@ -254,19 +254,6 @@ fn anyRequiresContext(comptime specs: anytype) bool {
     return false;
 }
 
-fn isRequired(comptime field: std.builtin.Type.StructField, comptime strict: bool) bool {
-    if (strict) return true;
-    return field.default_value_ptr == null and @typeInfo(field.type) != .optional;
-}
-
-fn requiredFieldCount(comptime fields: []const std.builtin.Type.StructField, comptime strict: bool) usize {
-    comptime var count: usize = 0;
-    inline for (fields) |field| {
-        if (isRequired(field, strict)) count += 1;
-    }
-    return count;
-}
-
 test "typed tools generate function definitions" {
     const Args = struct {
         location: []const u8,
