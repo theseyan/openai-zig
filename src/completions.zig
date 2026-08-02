@@ -428,9 +428,8 @@ pub const ChatCompletionsRequest = struct {
     /// Optional: Whether to stream the response as server-sent events.
     stream: ?bool = null,
 
-    /// Optional: Constrains effort on reasoning for reasoning models (o1 and o3-mini models only)
-    /// Supported values: "low", "medium", "high"
-    /// Defaults to "medium" if left null,
+    /// Optional: Constrains effort on supported reasoning models.
+    /// Values are model-dependent and may include "none", "minimal", "low", "medium", "high", "xhigh", and "max".
     reasoning_effort: ?[]const u8 = null,
 
     /// Optional: Set of key-value pairs for storing additional information.
@@ -484,9 +483,8 @@ pub const ChatCompletionsRequest = struct {
     /// Optional: Seed for deterministic sampling
     seed: ?i64 = null,
 
-    /// Optional: Latency tier for processing the request
-    /// Values: "auto", "default"
-    /// Defaults to "auto"
+    /// Optional: Processing tier for the request.
+    /// Values are availability-dependent and may include "auto", "default", "flex", "priority", and "fast".
     service_tier: ?[]const u8 = null,
 
     /// Optional: Up to 4 sequences where API stops generating tokens

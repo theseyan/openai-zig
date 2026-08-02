@@ -359,13 +359,13 @@ fn classifyErrorResponse(allocator: std.mem.Allocator, status: std.http.Status, 
 
 /// Options to be passed through to the `OpenAI.init` function.
 pub const OpenAIConfig = struct {
-    /// Your OpenAI API key. If left null, it will attempt to read from the `OPENAI_API_KEY` environment variable.
+    /// Your OpenAI API key. If null and `environ_map` is provided, reads `OPENAI_API_KEY` from it.
     api_key: ?[]const u8 = null,
-    /// Your OpenAI base url. If left null, it will attempt to read from the `OPENAI_BASE_URL` environment variable, otherwise will default to `"https://api.openai.com/v1"`.
+    /// Your OpenAI base URL. If null, reads `OPENAI_BASE_URL` from `environ_map`, then defaults to `"https://api.openai.com/v1"`.
     base_url: ?[]const u8 = null,
-    /// Your OpenAI organization id. If left null, it will attempt to read from `OPENAI_ORG_ID` environment variable.
+    /// Your OpenAI organization ID. If null and `environ_map` is provided, reads `OPENAI_ORG_ID` from it.
     organization: ?[]const u8 = null,
-    /// Your OpenAI project id. If left null, it will attempt to read from `OPENAI_PROJECT_ID` in `environ_map`.
+    /// Your OpenAI project ID. If null and `environ_map` is provided, reads `OPENAI_PROJECT_ID` from it.
     project: ?[]const u8 = null,
     /// The maximum number of retries the client will attempt. Defaults to `3`.
     max_retries: usize = 3,
@@ -672,7 +672,7 @@ pub const OpenAI = struct {
     ///     .json = body,
     /// }, ResponseBodyStruct); // pass in null for no response body
     /// ```
-    /// Note that the `ResponseType` _must_ have a field called `arena` of type `*std.heap.ArenaAllocator` (or you will get a @compileError).
+    /// Note that the `ResponseType` _must_ have a field called `arena` of type `json.Arena` (or you will get a @compileError).
     /// This will be used to store the allocator that allocates all memory for the resulting struct.
     /// The user is responsible for managing that memory.
     pub fn request(self: *const OpenAI, options: OpenAIRequest, comptime ResponseType: ?type) !if (ResponseType) |T| T else void {

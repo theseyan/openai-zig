@@ -78,7 +78,7 @@ pub const Embeddings = struct {
 
     /// Sends `POST` request to `/embeddings` with the given `EmbeddingsRequest`.
     /// The caller is also responsible for calling deinit() on the response to free all allocated memory.
-    /// Returns a `client.Resource` wrapper containing an `EmbeddingsResponse`.
+    /// Returns an arena-backed `EmbeddingsResponse`.
     pub fn create(self: *Embeddings, request: EmbeddingsRequest) !EmbeddingsResponse {
         const body = try json.stringify(self.openai.allocator, request, .{
             .emit_null_optional_fields = false,
