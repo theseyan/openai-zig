@@ -23,6 +23,7 @@ const log = std.log.scoped(.openai);
 
 const INITIAL_RETRY_DELAY = 0.5;
 const MAX_RETRY_DELAY = 8;
+const MAX_SERVER_RETRY_DELAY = 60;
 pub const DEFAULT_USER_AGENT = "openai-zig/0.2.4";
 
 pub const AbortController = struct {
@@ -286,6 +287,43 @@ fn allocResponseBody(allocator: std.mem.Allocator, response: *std.http.Client.Re
     var decompress: std.http.Decompress = undefined;
     const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
     return reader.allocRemaining(allocator, .limited(max_bytes));
+}
+
+fn isRetryableStatus(status: std.http.Status) bool {
+    return switch (status) {
+        .request_timeout,
+        .conflict,
+        .too_many_requests,
+        .internal_server_error,
+        .bad_gateway,
+        .service_unavailable,
+        .gateway_timeout,
+        => true,
+        else => false,
+    };
+}
+
+fn retryAfterSeconds(head: std.http.Client.Response.Head) ?f32 {
+    var headers = head.iterateHeaders();
+    while (headers.next()) |header| {
+        const divisor: f32 = if (std.ascii.eqlIgnoreCase(header.name, "retry-after-ms"))
+            1000
+        else if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
+            1
+        else
+            continue;
+        const parsed = std.fmt.parseFloat(f32, header.value) catch continue;
+        const seconds = parsed / divisor;
+        if (std.math.isFinite(seconds) and seconds >= 0 and seconds <= MAX_SERVER_RETRY_DELAY) return seconds;
+    }
+    return null;
+}
+
+fn waitBeforeRetry(self: *const OpenAI, attempt: usize, retry_after: ?f32, backoff: f32) !f32 {
+    const delay = retry_after orelse backoff;
+    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, delay });
+    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(delay * std.time.ns_per_s)), .awake);
+    return if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
 }
 
 fn getErrorFromStatus(status: std.http.Status) OpenAIError {
@@ -554,7 +592,8 @@ pub const OpenAI = struct {
             }
         };
 
-        for (0..self.max_retries + 1) |attempt| {
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
             req.* = try std.http.Client.request(http_client, method, uri, .{
                 .headers = self.headers,
                 .extra_headers = self.extra_headers,
@@ -594,14 +633,13 @@ pub const OpenAI = struct {
                 try checkCanceled(req, controller);
                 return err;
             };
+            const retry_after = retryAfterSeconds(response.head);
             const status_int = @intFromEnum(response.head.status);
             log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, response.head.status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
-                if (attempt != self.max_retries and status_int >= 429) {
-                    // retry on 429, 500, and 503
-                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
-                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
-                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                if (attempt < self.max_retries and isRetryableStatus(response.head.status)) {
+                    backoff = try waitBeforeRetry(self, attempt, retry_after, backoff);
+                    try checkCanceled(req, controller);
                     if (attached) {
                         if (controller) |c| {
                             if (req.connection) |connection| {
@@ -622,8 +660,6 @@ pub const OpenAI = struct {
                 return stream;
             }
         }
-        // max_retries must be >= 0 (since it's usize) and loop condition is 0..max_retries+1
-        unreachable;
     }
 
     /// Makes a request to the OpenAI base_url provided to the client, with the corresponding method, path, and options provided.
@@ -651,32 +687,39 @@ pub const OpenAI = struct {
         defer client.deinit();
         var backoff: f32 = INITIAL_RETRY_DELAY;
 
-        for (0..self.max_retries + 1) |attempt| {
-            var response_writer = std.Io.Writer.Allocating.init(allocator);
-            defer response_writer.deinit();
-            const result = try client.fetch(.{
-                .location = .{ .uri = uri },
-                .method = method,
-                .payload = options.json,
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
+            var req = try std.http.Client.request(&client, method, uri, .{
                 .headers = self.headers,
                 .extra_headers = self.extra_headers,
                 .redirect_behavior = .unhandled,
-                .response_writer = &response_writer.writer,
             });
-            if (options.json) |body| log.debug("{s}", .{body});
-            const body = try response_writer.toOwnedSlice();
+            defer req.deinit();
+
+            if (options.json) |request_body| {
+                req.transfer_encoding = .{ .content_length = request_body.len };
+                var body_writer = try req.sendBodyUnflushed(&.{});
+                log.debug("{s}", .{request_body});
+                try body_writer.writer.writeAll(request_body);
+                try body_writer.end();
+                try req.connection.?.flush();
+            } else {
+                try req.sendBodiless();
+            }
+
+            var raw_response = try req.receiveHead(&.{});
+            const retry_after = retryAfterSeconds(raw_response.head);
+            const body = try allocResponseBody(allocator, &raw_response, std.math.maxInt(usize));
             defer allocator.free(body);
 
-            const status_int = @intFromEnum(result.status);
-            log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, result.status.phrase() orelse "Unknown" });
+            const status = raw_response.head.status;
+            const status_int = @intFromEnum(status);
+            log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
-                if (attempt != self.max_retries and status_int >= 429) {
-                    // retry on 429, 500, and 503
-                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
-                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
-                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                if (attempt < self.max_retries and isRetryableStatus(status)) {
+                    backoff = try waitBeforeRetry(self, attempt, retry_after, backoff);
                 } else {
-                    return handleErrorResponse(allocator, result.status, body);
+                    return handleErrorResponse(allocator, status, body);
                 }
             } else {
                 if (ResponseType) |T| {
@@ -687,8 +730,6 @@ pub const OpenAI = struct {
                 }
             }
         }
-        // max_retries must be >= 0 (since it's usize) and loop condition is 0..max_retries+1
-        unreachable;
     }
 
     /// Makes a request and returns the raw response body. Caller owns the returned bytes.
@@ -704,7 +745,8 @@ pub const OpenAI = struct {
         defer http_client.deinit();
         var backoff: f32 = INITIAL_RETRY_DELAY;
 
-        for (0..self.max_retries + 1) |attempt| {
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
             var req = try std.http.Client.request(&http_client, method, uri, .{
                 .headers = self.headers,
                 .extra_headers = self.extra_headers,
@@ -724,16 +766,15 @@ pub const OpenAI = struct {
             }
 
             var response = try req.receiveHead(&.{});
+            const retry_after = retryAfterSeconds(response.head);
             const body = try allocResponseBody(allocator, &response, max_bytes);
 
             const status_int = @intFromEnum(response.head.status);
             log.info("{s} - {s} - {d} {s}", .{ @tagName(method), url_string, status_int, response.head.status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
-                if (attempt != self.max_retries and status_int >= 429) {
+                if (attempt < self.max_retries and isRetryableStatus(response.head.status)) {
                     allocator.free(body);
-                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
-                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
-                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                    backoff = try waitBeforeRetry(self, attempt, retry_after, backoff);
                 } else {
                     defer allocator.free(body);
                     return handleErrorResponse(allocator, response.head.status, body);
@@ -742,7 +783,6 @@ pub const OpenAI = struct {
                 return body;
             }
         }
-        unreachable;
     }
 
     /// Makes a multipart/form-data request to OpenAI.
@@ -777,7 +817,8 @@ pub const OpenAI = struct {
         headers.content_type = .{ .override = options.content_type };
         var backoff: f32 = INITIAL_RETRY_DELAY;
 
-        for (0..self.max_retries + 1) |attempt| {
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
             var req = try std.http.Client.request(&http_client, .POST, uri, .{
                 .headers = headers,
                 .extra_headers = self.extra_headers,
@@ -792,16 +833,15 @@ pub const OpenAI = struct {
             try req.connection.?.flush();
 
             var response = try req.receiveHead(&.{});
+            const retry_after = retryAfterSeconds(response.head);
             const body = try allocResponseBody(allocator, &response, std.math.maxInt(usize));
             defer allocator.free(body);
 
             const status_int = @intFromEnum(response.head.status);
             log.info("POST - {s} - {d} {s}", .{ url_string, status_int, response.head.status.phrase() orelse "Unknown" });
             if (status_int < 200 or status_int >= 300) {
-                if (attempt != self.max_retries and status_int >= 429) {
-                    log.info("Retrying ({d}/{d}) after {d} seconds.", .{ attempt + 1, self.max_retries, backoff });
-                    try std.Io.sleep(self.io, .fromNanoseconds(@intFromFloat(backoff * std.time.ns_per_s)), .awake);
-                    backoff = if (backoff * 2 <= MAX_RETRY_DELAY) backoff * 2 else MAX_RETRY_DELAY;
+                if (attempt < self.max_retries and isRetryableStatus(response.head.status)) {
+                    backoff = try waitBeforeRetry(self, attempt, retry_after, backoff);
                 } else {
                     return handleErrorResponse(allocator, response.head.status, body);
                 }
@@ -813,7 +853,6 @@ pub const OpenAI = struct {
                 }
             }
         }
-        unreachable;
     }
 };
 
@@ -855,4 +894,33 @@ test "decompression buffers match supported encodings" {
     try std.testing.expectEqual(@as(usize, std.compress.flate.max_window_len), try decompressionBufferSize(.deflate));
     try std.testing.expectEqual(@as(usize, std.compress.zstd.default_window_len), try decompressionBufferSize(.zstd));
     try std.testing.expectError(error.UnsupportedCompressionMethod, decompressionBufferSize(.compress));
+}
+
+test "retry policy includes only transient statuses" {
+    try std.testing.expect(isRetryableStatus(.request_timeout));
+    try std.testing.expect(isRetryableStatus(.conflict));
+    try std.testing.expect(isRetryableStatus(.too_many_requests));
+    try std.testing.expect(isRetryableStatus(.internal_server_error));
+    try std.testing.expect(isRetryableStatus(.bad_gateway));
+    try std.testing.expect(isRetryableStatus(.service_unavailable));
+    try std.testing.expect(isRetryableStatus(.gateway_timeout));
+    try std.testing.expect(!isRetryableStatus(.request_header_fields_too_large));
+    try std.testing.expect(!isRetryableStatus(.not_implemented));
+}
+
+test "retry delay honors numeric response headers" {
+    const milliseconds = try std.http.Client.Response.Head.parse(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After-Ms: 1250\r\n\r\n",
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, 1.25), retryAfterSeconds(milliseconds).?, 0.001);
+
+    const seconds = try std.http.Client.Response.Head.parse(
+        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\n\r\n",
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, 2), retryAfterSeconds(seconds).?, 0.001);
+
+    const excessive = try std.http.Client.Response.Head.parse(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\n\r\n",
+    );
+    try std.testing.expect(retryAfterSeconds(excessive) == null);
 }
