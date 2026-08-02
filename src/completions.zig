@@ -611,6 +611,12 @@ pub const ChatCompletion = struct {
     }
 };
 
+fn withStreamMode(request: ChatCompletionsRequest, streaming: bool) ChatCompletionsRequest {
+    var payload = request;
+    payload.stream = if (streaming) true else null;
+    return payload;
+}
+
 /// A struct that contains methods for creating chat completions
 pub const Completions = struct {
     openai: *const client.OpenAI,
@@ -627,7 +633,7 @@ pub const Completions = struct {
     /// The caller is also responsible for calling deinit() on the response to free all allocated memory.
     pub fn create(self: *Completions, request: ChatCompletionsRequest) !ChatCompletion {
         const allocator = self.openai.allocator;
-        const body = try json.stringify(allocator, request, .{
+        const body = try json.stringify(allocator, withStreamMode(request, false), .{
             .emit_null_optional_fields = false,
         });
         defer allocator.free(body);
@@ -657,10 +663,7 @@ pub const Completions = struct {
     fn createStreamInner(self: *const Completions, request: ChatCompletionsRequest, controller: ?*client.AbortController) !client.Stream(ChatCompletionChunk) {
         const allocator = self.openai.allocator;
 
-        var payload = request;
-        payload.stream = true;
-
-        const body = try json.stringify(allocator, payload, .{
+        const body = try json.stringify(allocator, withStreamMode(request, true), .{
             .emit_null_optional_fields = false,
         });
         defer allocator.free(body);
@@ -675,6 +678,21 @@ pub const Completions = struct {
         return self.openai.requestStream(stream_options, ChatCompletionChunk);
     }
 };
+
+test "chat completion methods control stream mode" {
+    const messages = [_]ChatMessage{.{
+        .role = "user",
+        .content = .{ .text = "Hello" },
+    }};
+    const request = ChatCompletionsRequest{
+        .model = "gpt-4o-mini",
+        .messages = &messages,
+        .stream = true,
+    };
+
+    try std.testing.expect(withStreamMode(request, false).stream == null);
+    try std.testing.expectEqual(true, withStreamMode(request, true).stream.?);
+}
 
 test "chat message serializes text content as a string" {
     const allocator = std.testing.allocator;
