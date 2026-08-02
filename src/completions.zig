@@ -6,6 +6,7 @@ pub const ImageDetail = enum {
     auto,
     low,
     high,
+    original,
 };
 
 pub const ImageUrl = struct {
@@ -820,6 +821,19 @@ test "image URL helper builds data URL" {
     defer allocator.free(url);
 
     try std.testing.expectEqualStrings("data:image/png;base64,aGVsbG8=", url);
+}
+
+test "image detail serializes original mode" {
+    const allocator = std.testing.allocator;
+    const body = try json.stringify(allocator, ImageUrl{
+        .url = "https://example.com/image.png",
+        .detail = .original,
+    }, .{ .emit_null_optional_fields = false });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"url":"https://example.com/image.png","detail":"original"}
+    , body);
 }
 
 test "chat request serializes metadata logit bias prediction and audio" {
