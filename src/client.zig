@@ -17,6 +17,7 @@ const completions = @import("completions.zig");
 const embeddings = @import("embeddings.zig");
 const files = @import("files.zig");
 const models = @import("models.zig");
+const responses = @import("responses.zig");
 const json = @import("json.zig");
 
 const log = std.log.scoped(.openai);
@@ -382,6 +383,7 @@ pub const OpenAI = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     chat: chat.Chat,
+    responses: responses.Responses,
     models: models.Models,
     embeddings: embeddings.Embeddings,
     files: files.Files,
@@ -435,6 +437,7 @@ pub const OpenAI = struct {
             .allocator = allocator,
             .io = io,
             .chat = undefined, // have to pass in self
+            .responses = undefined, // have to pass in self
             .embeddings = undefined, // have to pass in self
             .files = undefined, // have to pass in self
             .models = undefined, // have to pass in self
@@ -474,6 +477,7 @@ pub const OpenAI = struct {
 
         // init sub components
         self.chat = chat.Chat.init(self);
+        self.responses = responses.Responses.init(self);
         self.embeddings = embeddings.Embeddings.init(self);
         self.files = files.Files.init(self);
         self.models = models.Models.init(self);
@@ -511,6 +515,7 @@ pub const OpenAI = struct {
 
     pub fn deinit(self: *OpenAI) void {
         self.chat.deinit();
+        self.responses.deinit();
         self.embeddings.deinit();
         self.files.deinit();
         self.models.deinit();

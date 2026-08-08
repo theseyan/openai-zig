@@ -13,6 +13,7 @@
 - Built-in retry logic
 - Environment variable config support for API keys, organization IDs, project IDs, and base URLs
 - Chat completions, including streaming responses, image/audio/file inputs, and tool calling
+- Responses API, including multimodal inputs, tools, reasoning, structured outputs, streaming, background responses, compaction, and input token counting
 - Embeddings
 - Models
 - Files upload with `multipart/form-data`
@@ -81,6 +82,68 @@ var client = try OpenAI.init(allocator, io.io(), .{
     .user_agent = "my-app/1.0",
 });
 defer client.deinit();
+```
+
+### Responses API
+
+#### Regular
+
+```zig
+var response = try client.responses.create(.{
+    .model = "gpt-5",
+    .input = .{ .text = "Explain why Zig error unions are useful." },
+    .reasoning = .{ .effort = "medium" },
+});
+defer response.deinit();
+
+const text = try response.outputText(allocator);
+defer allocator.free(text);
+std.debug.print("{s}\n", .{text});
+```
+
+Responses retain every output item as a `std.json.Value`, including specialized
+tool items. Typed request variants cover the supported SDK capabilities, with
+`raw` variants available for protocol extensions.
+
+#### Streamed Response
+
+```zig
+var stream = try client.responses.createStream(.{
+    .model = "gpt-5",
+    .input = .{ .text = "Write a short poem about Zig." },
+});
+defer stream.deinit();
+
+while (try stream.next()) |event| {
+    if (std.mem.eql(u8, event.type, "response.output_text.delta")) {
+        if (event.delta()) |delta| std.debug.print("{s}", .{delta});
+    }
+}
+```
+
+`createStreamAbortable` and `retrieveStreamAbortable` accept the same
+`AbortController` used by Chat Completions. The resource also exposes:
+
+```zig
+var stored = try client.responses.retrieve("resp_123", .{});
+defer stored.deinit();
+
+var items = try client.responses.input_items.list("resp_123", .{ .limit = 20 });
+defer items.deinit();
+
+var count = try client.responses.input_tokens.count(.{
+    .model = "gpt-5",
+    .input = .{ .text = "Count this input." },
+});
+defer count.deinit();
+
+var compacted = try client.responses.compact(.{ .model = "gpt-5" });
+defer compacted.deinit();
+
+var canceled = try client.responses.cancel("resp_123");
+defer canceled.deinit();
+
+try client.responses.delete("resp_123");
 ```
 
 ### Chat Completions
